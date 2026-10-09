@@ -26,7 +26,8 @@ class OutletForm
                     ])
                     ->searchable()
                     ->preload()
-                    ->required(),
+                    ->required()
+                    ->disabled(fn (string $operation): bool => $operation === 'edit'),
                 TextInput::make('name')
                     ->required()
                     ->maxLength(255),

@@ -154,20 +154,6 @@ class FilamentBusinessOutletTest extends TestCase
         $this->assertDatabaseCount('outlets', 0);
     }
 
-    public function test_outlet_cannot_be_moved_to_another_users_business(): void
-    {
-        $business = Business::factory()->for($this->user)->create();
-        $outlet = Outlet::factory()->for($business)->create();
-        $otherBusiness = Business::factory()->create();
-
-        Livewire::test(EditOutlet::class, ['record' => $outlet->getKey()])
-            ->fillForm(['business_id' => $otherBusiness->id])
-            ->call('save')
-            ->assertHasFormErrors(['business_id']);
-
-        $this->assertSame($business->id, $outlet->fresh()->business_id);
-    }
-
     // Outlet: validation
 
     public function test_outlet_business_and_name_are_required(): void

@@ -16,4 +16,12 @@ class EditOutlet extends EditRecord
             DeleteAction::make(),
         ];
     }
+
+    protected function mutateFormDataBeforeSave(array $data): array
+    {
+        // An outlet's business is fixed once created.
+        unset($data['business_id']);
+
+        return $data;
+    }
 }

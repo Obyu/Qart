@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['business_id', 'name'])]
+#[Fillable(['name'])]
 class Outlet extends Model
 {
     /** @use HasFactory<\Database\Factories\OutletFactory> */
