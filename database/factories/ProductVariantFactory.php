@@ -3,10 +3,11 @@
 namespace Database\Factories;
 
 use App\Models\Product;
+use App\Models\ProductVariant;
 use Illuminate\Database\Eloquent\Factories\Factory;
 
 /**
- * @extends Factory<\App\Models\ProductVariant>
+ * @extends Factory<ProductVariant>
  */
 class ProductVariantFactory extends Factory
 {

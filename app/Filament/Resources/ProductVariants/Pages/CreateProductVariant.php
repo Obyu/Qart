@@ -2,8 +2,8 @@
 
 namespace App\Filament\Resources\ProductVariants\Pages;
 
-use App\Filament\Resources\ProductVariants\ProductVariantResource;
 use App\Filament\Resources\Products\ProductResource;
+use App\Filament\Resources\ProductVariants\ProductVariantResource;
 use Filament\Resources\Pages\CreateRecord;
 use Illuminate\Database\Eloquent\Model;
 
