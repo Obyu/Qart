@@ -59,6 +59,13 @@ class ProductVariantDatabaseTest extends TestCase
         $this->assertSame('A-1', $variant->sku);
     }
 
+    public function test_price_is_mass_assignable(): void
+    {
+        $variant = (new ProductVariant)->fill(['name' => 'A', 'sku' => 'A-1', 'price' => '9.99']);
+
+        $this->assertSame('9.99', $variant->price);
+    }
+
     // SKU rules enforced by the database
 
     public function test_sku_is_required(): void
@@ -67,7 +74,7 @@ class ProductVariantDatabaseTest extends TestCase
 
         $this->expectException(QueryException::class);
 
-        $product->variants()->create(['name' => 'No SKU', 'sku' => null]);
+        $product->variants()->create(['name' => 'No SKU', 'sku' => null, 'price' => '10.00']);
     }
 
     public function test_sku_of_exactly_100_characters_is_accepted(): void
@@ -106,6 +113,70 @@ class ProductVariantDatabaseTest extends TestCase
         $this->expectException(UniqueConstraintViolationException::class);
 
         ProductVariant::factory()->create(['sku' => 'ks-s']);
+    }
+
+    // Price rules enforced by the database
+
+    public function test_price_is_stored_with_two_decimals(): void
+    {
+        $variant = ProductVariant::factory()->create(['price' => '12.5']);
+
+        $this->assertSame('12.50', $variant->fresh()->price);
+    }
+
+    public function test_price_may_be_null_while_the_column_is_still_nullable(): void
+    {
+        $variant = ProductVariant::factory()->create(['price' => null]);
+
+        $this->assertNull($variant->fresh()->price);
+    }
+
+    public function test_price_of_zero_is_accepted(): void
+    {
+        $variant = ProductVariant::factory()->create(['price' => '0.00']);
+
+        $this->assertSame('0.00', $variant->fresh()->price);
+    }
+
+    public function test_the_largest_price_the_column_can_hold_is_accepted(): void
+    {
+        $variant = ProductVariant::factory()->create(['price' => '999999999999.99']);
+
+        $this->assertSame('999999999999.99', $variant->fresh()->price);
+    }
+
+    public function test_a_price_above_the_column_maximum_is_rejected(): void
+    {
+        $this->expectException(QueryException::class);
+
+        ProductVariant::factory()->create(['price' => '1000000000000.00']);
+    }
+
+    public function test_a_negative_price_is_rejected_on_insert(): void
+    {
+        $this->assertNegativePriceRejected(fn () => ProductVariant::factory()->create(['price' => '-0.01']));
+
+        $this->assertDatabaseCount('product_variants', 0);
+    }
+
+    public function test_a_negative_price_is_rejected_on_update(): void
+    {
+        $variant = ProductVariant::factory()->create(['price' => '5.00']);
+
+        $this->assertNegativePriceRejected(fn () => $variant->update(['price' => '-1.00']));
+
+        $this->assertSame('5.00', $variant->fresh()->price);
+    }
+
+    private function assertNegativePriceRejected(callable $write): void
+    {
+        try {
+            $write();
+
+            $this->fail('Expected the database to reject the negative price.');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString('product_variants_price_non_negative', $e->getMessage());
+        }
     }
 
     // Delete behavior
@@ -158,6 +229,7 @@ class ProductVariantDatabaseTest extends TestCase
 
         $variants->each(function (ProductVariant $variant) {
             $this->assertNotEmpty($variant->name);
+            $this->assertMatchesRegularExpression('/^\d{1,12}\.\d{2}$/', $variant->price);
             $this->assertLessThanOrEqual(100, strlen($variant->sku));
             $this->assertNotNull($variant->product);
             $this->assertNotNull($variant->product->business_id);

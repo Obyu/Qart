@@ -22,6 +22,13 @@ class ProductVariantsTable
                     ->label('SKU')
                     ->searchable()
                     ->sortable(),
+                // The cast already yields a two-decimal string such as "12.50".
+                // No currency symbol: the currency has not been decided yet.
+                TextColumn::make('price')
+                    ->label('Price')
+                    ->placeholder('Not set')
+                    ->alignEnd()
+                    ->sortable(),
                 TextColumn::make('product.name')
                     ->label('Product'),
                 TextColumn::make('product.category.name')

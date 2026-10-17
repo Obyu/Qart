@@ -20,6 +20,7 @@ class CreateProductVariant extends CreateRecord
         return $product->variants()->create([
             'name' => $data['name'],
             'sku' => $data['sku'],
+            'price' => $data['price'],
         ]);
     }
 }

@@ -50,6 +50,17 @@ class ProductVariantForm
                     ->required()
                     ->maxLength(100)
                     ->unique(ignoreRecord: true),
+                TextInput::make('price')
+                    ->label('Price')
+                    ->required()
+                    ->numeric()
+                    ->step('0.01')
+                    ->minValue(0)
+                    ->maxValue(999999999999.99)
+                    // Authoritative rule: plain decimal text, at most 12 integer digits and
+                    // 2 decimals. It rejects signs, exponents, separators and a 3rd decimal,
+                    // and keeps the value a string so no float is involved.
+                    ->rules(['regex:/^\d{1,12}(\.\d{1,2})?$/']),
             ]);
     }
 }
