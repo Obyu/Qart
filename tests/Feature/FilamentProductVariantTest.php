@@ -324,24 +324,16 @@ class FilamentProductVariantTest extends TestCase
         $this->assertSame('5.00', $variant->fresh()->price);
     }
 
-    public function test_a_variant_without_a_price_must_be_given_one_when_edited(): void
+    public function test_the_price_cannot_be_cleared_when_editing(): void
     {
-        // Existing variants predate the price column, so they start with NULL.
-        $variant = $this->ownVariant(['price' => null]);
+        $variant = $this->ownVariant(['price' => '5.00']);
 
         Livewire::test(EditProductVariant::class, ['record' => $variant->getKey()])
             ->fillForm(['price' => null])
             ->call('save')
             ->assertHasFormErrors(['price' => 'required']);
 
-        $this->assertNull($variant->fresh()->price);
-
-        Livewire::test(EditProductVariant::class, ['record' => $variant->getKey()])
-            ->fillForm(['price' => '15.00'])
-            ->call('save')
-            ->assertHasNoFormErrors();
-
-        $this->assertSame('15.00', $variant->fresh()->price);
+        $this->assertSame('5.00', $variant->fresh()->price);
     }
 
     public function test_a_variant_can_be_deleted_and_its_product_remains(): void

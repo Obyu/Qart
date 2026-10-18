@@ -41,7 +41,7 @@ class ProductVariantDatabaseTest extends TestCase
     {
         $product = Product::factory()->create();
 
-        $variant = $product->variants()->create(['name' => 'Small', 'sku' => 'KS-S']);
+        $variant = $product->variants()->create(['name' => 'Small', 'sku' => 'KS-S', 'price' => '10.00']);
 
         $this->assertDatabaseHas('product_variants', [
             'id' => $variant->id,
@@ -124,11 +124,11 @@ class ProductVariantDatabaseTest extends TestCase
         $this->assertSame('12.50', $variant->fresh()->price);
     }
 
-    public function test_price_may_be_null_while_the_column_is_still_nullable(): void
+    public function test_price_is_required_by_the_database(): void
     {
-        $variant = ProductVariant::factory()->create(['price' => null]);
+        $this->expectException(QueryException::class);
 
-        $this->assertNull($variant->fresh()->price);
+        ProductVariant::factory()->create(['price' => null]);
     }
 
     public function test_price_of_zero_is_accepted(): void
