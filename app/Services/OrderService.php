@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\OrderStatus;
 use App\Exceptions\OrderException;
+use App\Exceptions\StockException;
 use App\Models\Business;
 use App\Models\Order;
 use App\Models\OrderItem;
@@ -16,10 +17,11 @@ use Illuminate\Support\Facades\DB;
  * The only place where orders and order items are written.
  *
  * Lifecycle: an order is "open" while items can be added and "completed" once it
- * is operationally finished. Completed does NOT mean paid and does not touch
- * stock: totals, payment settlement and stock deduction are designed in later
- * tasks. Completion is terminal here, and that is enforced by this service only,
- * not by the database.
+ * is operationally finished. Completed does NOT mean paid: totals and payment
+ * settlement are designed in later tasks. completeOrder() changes only the status
+ * and never touches stock; completeSale() deducts the stock and completes the
+ * order in one transaction. Completion is terminal here, and that is enforced by
+ * this service only, not by the database.
  *
  * Every model passed in is re-read from the database; its in-memory attributes
  * are never trusted. Operations that change an existing order lock the order row
@@ -40,6 +42,13 @@ class OrderService
 
     /** Deadlock retries (only the outermost transaction retries). */
     private const TRANSACTION_ATTEMPTS = 5;
+
+    private readonly StockService $stock;
+
+    public function __construct(?StockService $stock = null)
+    {
+        $this->stock = $stock ?? new StockService;
+    }
 
     /**
      * Create an open order for an outlet of a business the actor owns.
@@ -159,6 +168,50 @@ class OrderService
             if (! $hasItems) {
                 throw OrderException::emptyOrder();
             }
+
+            $locked->forceFill([
+                'status' => OrderStatus::Completed,
+                'completed_at' => now(),
+            ])->save();
+
+            return $locked->refresh();
+        }, self::TRANSACTION_ATTEMPTS);
+    }
+
+    /**
+     * Sell an open order: deduct its stock and complete it, all or nothing.
+     *
+     * In one transaction this locks the order for the actor, requires it to be
+     * open and to have items, lets StockService::recordSale() deduct every line
+     * and write one sale movement per item, and only then marks the order
+     * completed. Any failure rolls the stock updates, the movements and the status
+     * change back together. A StockException (for example insufficient stock) is
+     * not wrapped: callers read its reason and productVariantId. A completed order
+     * is rejected as not open, so stock is never deducted twice.
+     *
+     * Like completeOrder(), this does not mean the order has been paid. Only
+     * sequential behaviour has been tested; multi-process behaviour is verified
+     * in a later stage and is not claimed to be proven.
+     *
+     * @throws OrderException
+     * @throws StockException
+     */
+    public function completeSale(User $actor, Order $order): Order
+    {
+        return DB::transaction(function () use ($actor, $order): Order {
+            $locked = $this->lockOrderForActor($actor, $order);
+            $this->assertOpen($locked);
+
+            $hasItems = OrderItem::query()
+                ->where('order_id', $locked->getKey())
+                ->lockForUpdate()
+                ->value('id') !== null;
+
+            if (! $hasItems) {
+                throw OrderException::emptyOrder();
+            }
+
+            $this->stock->recordSale($actor, $locked);
 
             $locked->forceFill([
                 'status' => OrderStatus::Completed,
