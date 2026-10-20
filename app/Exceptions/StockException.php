@@ -7,7 +7,8 @@ use RuntimeException;
 /**
  * Expected, recoverable failure of a stock operation.
  *
- * Callers (e.g. the Task #008 UI) can catch this class and read $reason.
+ * Callers (e.g. the Task #008 UI) can catch this class and read $reason. When the
+ * failure concerns one product variant, $productVariantId names it.
  */
 class StockException extends RuntimeException
 {
@@ -29,8 +30,15 @@ class StockException extends RuntimeException
 
     public const REASON_INVALID_NOTE = 'invalid_note';
 
-    public function __construct(public readonly string $reason, string $message)
-    {
+    public const REASON_EMPTY_SALE = 'empty_sale';
+
+    public const REASON_SALE_ALREADY_RECORDED = 'sale_already_recorded';
+
+    public function __construct(
+        public readonly string $reason,
+        string $message,
+        public readonly ?int $productVariantId = null,
+    ) {
         parent::__construct($message);
     }
 
@@ -64,11 +72,14 @@ class StockException extends RuntimeException
         return new self(self::REASON_QUANTITY_OVERFLOW, 'The resulting stock balance exceeds the maximum supported quantity.');
     }
 
-    public static function insufficientStock(string $current, string $delta): self
+    public static function insufficientStock(string $current, string $delta, ?int $productVariantId = null): self
     {
+        $subject = $productVariantId === null ? '' : " for product variant #{$productVariantId}";
+
         return new self(
             self::REASON_INSUFFICIENT_STOCK,
-            "Insufficient stock: a change of {$delta} would make the current balance of {$current} negative."
+            "Insufficient stock{$subject}: a change of {$delta} would make the current balance of {$current} negative.",
+            $productVariantId,
         );
     }
 
@@ -80,5 +91,15 @@ class StockException extends RuntimeException
     public static function invalidNote(): self
     {
         return new self(self::REASON_INVALID_NOTE, 'The note must not be longer than 255 characters.');
+    }
+
+    public static function emptySale(): self
+    {
+        return new self(self::REASON_EMPTY_SALE, 'A sale must contain at least one order item.');
+    }
+
+    public static function saleAlreadyRecorded(): self
+    {
+        return new self(self::REASON_SALE_ALREADY_RECORDED, 'The stock for this order has already been deducted.');
     }
 }

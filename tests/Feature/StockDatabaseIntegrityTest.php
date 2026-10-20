@@ -232,12 +232,30 @@ class StockDatabaseIntegrityTest extends TestCase
         $this->assertDatabaseRejects(
             'stock_movements_type_valid',
             fn () => DB::table('stock_movements')->insert($this->ids($outlet, $variant) + [
-                'type' => 'sale',
+                'type' => 'invalid_type',
                 'quantity_delta' => '-1.000',
                 'quantity_after' => '4.000',
                 'created_at' => now(),
             ])
         );
+    }
+
+    public function test_a_sale_movement_type_is_accepted(): void
+    {
+        [$outlet, $variant] = $this->scope();
+        StockLevel::factory()->create($this->ids($outlet, $variant) + ['quantity' => '4.000']);
+
+        DB::table('stock_movements')->insert($this->ids($outlet, $variant) + [
+            'type' => StockMovementType::Sale->value,
+            'quantity_delta' => '-1.000',
+            'quantity_after' => '4.000',
+            'created_at' => now(),
+        ]);
+
+        $this->assertSame('sale', StockMovementType::Sale->value);
+        $this->assertDatabaseHas('stock_movements', $this->ids($outlet, $variant) + [
+            'type' => 'sale',
+        ]);
     }
 
     public function test_quantities_keep_three_decimals_up_to_the_column_maximum(): void
@@ -270,6 +288,7 @@ class StockDatabaseIntegrityTest extends TestCase
             'stock_movements_outlet_id_foreign' => 'RESTRICT',
             'stock_movements_product_variant_id_foreign' => 'RESTRICT',
             'stock_movements_user_id_foreign' => 'SET NULL',
+            'stock_movements_order_item_id_foreign' => 'RESTRICT',
         ], $rules);
     }
 

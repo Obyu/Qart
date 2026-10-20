@@ -562,6 +562,6 @@ class StockServiceTest extends TestCase
             ->values()
             ->all();
 
-        $this->assertSame(['adjust', 'recordOpening'], $methods);
+        $this->assertSame(['adjust', 'recordOpening', 'recordSale'], $methods);
     }
 }

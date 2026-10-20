@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Enums\StockMovementType;
 use App\Exceptions\StockException;
+use App\Models\Order;
+use App\Models\OrderItem;
 use App\Models\Outlet;
 use App\Models\ProductVariant;
 use App\Models\StockLevel;
@@ -57,6 +59,113 @@ class StockService
         return $this->apply(StockMovementType::Adjustment, $actor, $outlet, $variant, $quantityDelta, $note);
     }
 
+    /**
+     * Deduct an order's quantities from the stock of the order's outlet, writing
+     * one immutable negative "sale" movement per order item.
+     *
+     * Called by OrderService::completeSale() inside the transaction that already
+     * holds the order lock. It is public only because PHP has no package-private
+     * visibility. It opens its own transaction, which joins the caller's, so even
+     * when called alone it is all-or-nothing. Lock order, for every caller: the
+     * order row, then its items, then the stock levels by ascending variant id,
+     * which keeps two sales from deadlocking each other.
+     *
+     * Everything is re-read from the database and validated before anything is
+     * written. A variant without a stock level counts as having no stock: a sale
+     * never creates a balance (a missing row is gap-locked only until the sale is
+     * rejected right away). Reads that are not locking reads run after the order
+     * lock, so they see every earlier completion. The unique key
+     * (order_item_id, type) is the database backstop against deducting an item twice.
+     *
+     * @return list<StockMovement> one movement per order item, in ascending variant id order
+     *
+     * @throws StockException
+     */
+    public function recordSale(User $actor, Order $order): array
+    {
+        return DB::transaction(function () use ($actor, $order): array {
+            $locked = Order::query()->whereKey($order->getKey())->lockForUpdate()->first();
+            $outlet = $locked === null ? null : Outlet::query()->find($locked->outlet_id);
+
+            if ($locked === null || $outlet === null) {
+                throw StockException::notFound();
+            }
+
+            if ((int) $outlet->business_id !== (int) $locked->business_id) {
+                throw StockException::businessMismatch();
+            }
+
+            $items = OrderItem::query()
+                ->with('productVariant')
+                ->where('order_id', $locked->getKey())
+                ->orderBy('product_variant_id')
+                ->lockForUpdate()
+                ->get();
+
+            if ($items->isEmpty()) {
+                throw StockException::emptySale();
+            }
+
+            foreach ($items as $item) {
+                if ($item->productVariant === null) {
+                    throw StockException::notFound();
+                }
+
+                $this->resolveScope($actor, $outlet, $item->productVariant);
+            }
+
+            $alreadySold = StockMovement::query()
+                ->where('type', StockMovementType::Sale->value)
+                ->whereIn('order_item_id', $items->modelKeys())
+                ->exists();
+
+            if ($alreadySold) {
+                throw StockException::saleAlreadyRecorded();
+            }
+
+            $outletId = (int) $outlet->getKey();
+
+            /** @var list<array{item_id: int, variant_id: int, level: StockLevel, delta: string, after: string}> $plan */
+            $plan = [];
+
+            foreach ($items as $item) {
+                $variantId = (int) $item->product_variant_id;
+                $required = bcadd((string) $item->quantity, '0', self::SCALE);
+                $delta = bcsub('0', $required, self::SCALE);
+
+                $level = $this->lockLevel($outletId, $variantId)
+                    ?? throw StockException::insufficientStock('0.000', $delta, $variantId);
+
+                $plan[] = [
+                    'item_id' => (int) $item->getKey(),
+                    'variant_id' => $variantId,
+                    'level' => $level,
+                    'delta' => $delta,
+                    'after' => $this->nextBalance($this->balanceOf($level), $delta, $variantId),
+                ];
+            }
+
+            $movements = [];
+
+            foreach ($plan as $line) {
+                $movements[] = $this->insertMovement(
+                    StockMovementType::Sale,
+                    $outletId,
+                    $line['variant_id'],
+                    $line['delta'],
+                    $line['after'],
+                    (int) $actor->getKey(),
+                    null,
+                    $line['item_id'],
+                );
+
+                $this->writeBalance($line['level'], $line['after']);
+            }
+
+            return $movements;
+        }, self::TRANSACTION_ATTEMPTS);
+    }
+
     private function apply(
         StockMovementType $type,
         User $actor,
@@ -77,36 +186,92 @@ class StockService
                 throw StockException::duplicateOpening();
             }
 
-            $current = bcadd((string) $level->quantity, '0', self::SCALE);
-            $after = bcadd($current, $delta, self::SCALE);
+            $after = $this->nextBalance($this->balanceOf($level), $delta);
 
-            if (bccomp($after, '0', self::SCALE) < 0) {
-                throw StockException::insufficientStock($current, $delta);
-            }
+            $movement = $this->insertMovement(
+                $type,
+                $outletId,
+                $variantId,
+                $delta,
+                $after,
+                (int) $actor->getKey(),
+                $note,
+            );
 
-            if (bccomp($after, self::MAX_BALANCE, self::SCALE) > 0) {
-                throw StockException::quantityOverflow();
-            }
-
-            $now = now();
-
-            $movement = new StockMovement;
-            $movement->forceFill([
-                'outlet_id' => $outletId,
-                'product_variant_id' => $variantId,
-                'type' => $type,
-                'quantity_delta' => $delta,
-                'quantity_after' => $after,
-                'user_id' => $actor->getKey(),
-                'note' => $note,
-            ])->save();
-
-            StockLevel::query()
-                ->whereKey($level->getKey())
-                ->update(['quantity' => $after, 'updated_at' => $now]);
+            $this->writeBalance($level, $after);
 
             return $movement;
         }, self::TRANSACTION_ATTEMPTS);
+    }
+
+    /**
+     * The balance of a locked level as a decimal string at scale 3.
+     */
+    private function balanceOf(StockLevel $level): string
+    {
+        return bcadd((string) $level->quantity, '0', self::SCALE);
+    }
+
+    /**
+     * Add a signed delta to a balance and enforce the balance rules: never
+     * negative, never above the column maximum. Shared by every stock write.
+     */
+    private function nextBalance(string $current, string $delta, ?int $variantId = null): string
+    {
+        $after = bcadd($current, $delta, self::SCALE);
+
+        if (bccomp($after, '0', self::SCALE) < 0) {
+            throw StockException::insufficientStock($current, $delta, $variantId);
+        }
+
+        if (bccomp($after, self::MAX_BALANCE, self::SCALE) > 0) {
+            throw StockException::quantityOverflow();
+        }
+
+        return $after;
+    }
+
+    /**
+     * Insert one immutable ledger row. Shared by every stock write.
+     */
+    private function insertMovement(
+        StockMovementType $type,
+        int $outletId,
+        int $variantId,
+        string $delta,
+        string $after,
+        int $actorId,
+        ?string $note,
+        ?int $orderItemId = null,
+    ): StockMovement {
+        $attributes = [
+            'outlet_id' => $outletId,
+            'product_variant_id' => $variantId,
+            'type' => $type,
+            'quantity_delta' => $delta,
+            'quantity_after' => $after,
+            'user_id' => $actorId,
+            'note' => $note,
+        ];
+
+        if ($orderItemId !== null) {
+            $attributes['order_item_id'] = $orderItemId;
+        }
+
+        $movement = new StockMovement;
+        $movement->forceFill($attributes)->save();
+
+        return $movement;
+    }
+
+    /**
+     * Store the new balance of a locked level. Shared by every stock write.
+     */
+    private function writeBalance(StockLevel $level, string $after): void
+    {
+        StockLevel::query()
+            ->whereKey($level->getKey())
+            ->update(['quantity' => $after, 'updated_at' => now()]);
     }
 
     /**
