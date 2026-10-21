@@ -11,11 +11,13 @@
 // application environment, the resolved database configuration (the same rules as
 // the guard in tests/TestCase.php) and the actually connected database all point at
 // the dedicated "testing" database. It never creates fixtures, never migrates and
-// never deletes anything; only OrderService writes, for the ids it is given.
+// never deletes anything; only OrderService writes, for the ids it is given. The
+// "complete-sale" operation reaches StockService through OrderService::completeSale().
 
 namespace Tests\Support;
 
 use App\Exceptions\OrderException;
+use App\Exceptions\StockException;
 use App\Models\Order;
 use App\Models\ProductVariant;
 use App\Models\User;
@@ -153,8 +155,8 @@ if ($id === null || ! preg_match('/^[a-z0-9_-]{1,40}$/D', $id)) {
     orderRefuse('--id must be 1 to 40 characters of a-z, 0-9, underscore or hyphen.');
 }
 
-if (! in_array($op, ['add-item', 'complete'], true)) {
-    orderRefuse('--op must be "add-item" or "complete".');
+if (! in_array($op, ['add-item', 'complete', 'complete-sale'], true)) {
+    orderRefuse('--op must be "add-item", "complete" or "complete-sale".');
 }
 
 $ids = [];
@@ -248,9 +250,13 @@ try {
     $order = Order::query()->findOrFail($ids['order']);
     $variant = $op === 'add-item' ? ProductVariant::query()->findOrFail($ids['variant']) : null;
 
-    // Every begun transaction counts, so a deadlock retry shows up as attempts > 1.
-    Event::listen(TransactionBeginning::class, function () use (&$attempts): void {
-        $attempts++;
+    // Only outermost transactions count (level 1), so a deadlock retry shows up as
+    // attempts > 1, while a nested transaction, such as the one inside
+    // StockService::recordSale(), does not.
+    Event::listen(TransactionBeginning::class, function (TransactionBeginning $event) use (&$attempts): void {
+        if ($event->connection->transactionLevel() === 1) {
+            $attempts++;
+        }
     });
 
     if ($hold) {
@@ -296,7 +302,9 @@ try {
             'unit_price' => $item->unit_price,
         ];
     } else {
-        $completed = $service->completeOrder($user, $order);
+        $completed = $op === 'complete-sale'
+            ? $service->completeSale($user, $order)
+            : $service->completeOrder($user, $order);
 
         $result += [
             'outcome' => 'success',
@@ -306,6 +314,12 @@ try {
     }
 } catch (OrderException $e) {
     $result += ['outcome' => 'order_exception', 'reason' => $e->reason];
+} catch (StockException $e) {
+    $result += [
+        'outcome' => 'stock_exception',
+        'reason' => $e->reason,
+        'product_variant_id' => $e->productVariantId,
+    ];
 } catch (Throwable $e) {
     if ($timedOutStage !== null) {
         $result += ['outcome' => 'timeout', 'stage' => $timedOutStage];
@@ -336,7 +350,7 @@ orderWriteJson($resultFile, $result);
 echo orderEncodeJson($result), "\n";
 
 exit(match ($result['outcome']) {
-    'success', 'order_exception' => 0,
+    'success', 'order_exception', 'stock_exception' => 0,
     'timeout' => 3,
     default => 1,
 });
