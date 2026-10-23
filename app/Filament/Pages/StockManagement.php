@@ -28,26 +28,29 @@ use Throwable;
 
 /**
  * Stock Management v1: a table of the stock balance of every product variant in
- * one outlet (Stage 2A) and an "Adjust Stock" action (Stage 2B).
+ * one outlet (Stage 2A), an "Adjust Stock" action (Stage 2B) and a "Record
+ * Opening Stock" action (Stage 2C).
  *
  * Security model (same as Cashier): $outletId and the variant chosen in the
- * Adjust Stock form are client-controlled and are never trusted. The outlet is
+ * Adjust Stock and Record Opening Stock forms are client-controlled and are
+ * never trusted. The outlet is
  * re-resolved from the database, scoped to outlets of businesses owned by the
  * authenticated user, when it changes (updatedOutletId), on every render
  * (getViewData), whenever the table query is built (stockQuery), and again when
- * the Adjust Stock form is validated and submitted. The variant is re-resolved
+ * the action form is validated and submitted. The variant is re-resolved
  * through the outlet's business at validation and again at submission. An ID
  * that does not resolve is treated as absent.
  *
  * The page never writes stock levels or movements itself: every change goes
- * through StockService::adjust(), which stays the final authority for
- * ownership, business consistency, locking and non-negative balances.
+ * through StockService::adjust() or StockService::recordOpening(), which stay
+ * the final authority for ownership, business consistency, locking, the
+ * once-per-pair opening rule and non-negative balances.
  */
 class StockManagement extends Page implements HasTable
 {
     use InteractsWithTable;
 
-    /** Variants offered per search in the Adjust Stock form. */
+    /** Variants offered per search in the variant selector of the stock forms. */
     private const VARIANT_SEARCH_LIMIT = 50;
 
     /** Failures the user can fix without leaving the modal. */
@@ -134,22 +137,7 @@ class StockManagement extends Page implements HasTable
                 ->modalSubmitActionLabel('Adjust stock')
                 ->disabled(fn (): bool => $this->resolveOutlet() === null)
                 ->schema([
-                    Select::make('variant_id')
-                        ->label('Product variant')
-                        ->helperText('Type to search by product, variant or SKU.')
-                        ->required()
-                        ->searchable()
-                        ->getSearchResultsUsing(fn (string $search): array => $this->variantSearchResults($search))
-                        ->getOptionLabelUsing(fn (mixed $value): ?string => $this->variantLabelFor($value))
-                        ->rules([
-                            fn (): Closure => function (string $attribute, mixed $value, Closure $fail): void {
-                                $outlet = $this->resolveOutlet();
-
-                                if ($outlet === null || $this->resolveVariant($outlet, $value) === null) {
-                                    $fail('Select a product variant from the list.');
-                                }
-                            },
-                        ]),
+                    $this->variantSelect(),
                     Radio::make('direction')
                         ->label('Direction')
                         ->options([
@@ -176,7 +164,59 @@ class StockManagement extends Page implements HasTable
                         ->rows(3),
                 ])
                 ->action(fn (array $data, Action $action) => $this->adjustStock($data, $action)),
+            Action::make('recordOpeningStock')
+                ->label('Record Opening Stock')
+                ->modalHeading('Record opening stock')
+                ->modalDescription('Record the initial stock of a product variant in this outlet. Opening stock can be recorded only once for each variant; use "Adjust Stock" for later changes.')
+                ->modalSubmitActionLabel('Record opening stock')
+                ->disabled(fn (): bool => $this->resolveOutlet() === null)
+                ->schema([
+                    $this->variantSelect(),
+                    TextInput::make('quantity')
+                        ->label('Opening quantity')
+                        ->helperText('A positive amount with up to 3 decimals. If this variant already has a balance in the outlet, the amount is added to that balance.')
+                        ->required()
+                        ->inputMode('decimal')
+                        ->rules([
+                            fn (): Closure => function (string $attribute, mixed $value, Closure $fail): void {
+                                if (StockQuantity::normalize($value) === null) {
+                                    $fail('Enter a positive number with at most 11 whole digits and 3 decimal places.');
+                                }
+                            },
+                        ]),
+                    Textarea::make('note')
+                        ->label('Note')
+                        ->maxLength(255)
+                        ->rows(3),
+                ])
+                ->action(fn (array $data, Action $action) => $this->recordOpeningStock($data, $action)),
         ];
+    }
+
+    /**
+     * The product-variant selector shared by the stock forms. The submitted ID is
+     * only a candidate: the options, the label and the validation rule all go
+     * through the outlet-scoped helpers, so a variant of another business is
+     * never offered and never accepted.
+     */
+    private function variantSelect(): Select
+    {
+        return Select::make('variant_id')
+            ->label('Product variant')
+            ->helperText('Type to search by product, variant or SKU.')
+            ->required()
+            ->searchable()
+            ->getSearchResultsUsing(fn (string $search): array => $this->variantSearchResults($search))
+            ->getOptionLabelUsing(fn (mixed $value): ?string => $this->variantLabelFor($value))
+            ->rules([
+                fn (): Closure => function (string $attribute, mixed $value, Closure $fail): void {
+                    $outlet = $this->resolveOutlet();
+
+                    if ($outlet === null || $this->resolveVariant($outlet, $value) === null) {
+                        $fail('Select a product variant from the list.');
+                    }
+                },
+            ]);
     }
 
     /**
@@ -249,6 +289,73 @@ class StockManagement extends Page implements HasTable
                 $this->variantLabel($variant).': '
                 .StockQuantity::formatSigned((string) $movement->quantity_delta)
                 .'. New balance: '.StockQuantity::format((string) $movement->quantity_after).'.'
+            )
+            ->send();
+    }
+
+    /**
+     * Record the submitted opening stock. Outlet and variant are resolved again
+     * here from the database; the form values are only candidates. The movement
+     * itself is written by StockService::recordOpening() and nothing else, which
+     * also enforces the once-per-pair rule, so a duplicate leaves the balance
+     * untouched. An existing balance (for example one created by an adjustment)
+     * is not an error: the opening quantity is added to it.
+     *
+     * Failure handling matches adjustStock(): failures the user can fix keep the
+     * modal open (halt), anything else closes it (cancel), and only safe, fixed
+     * messages are ever shown.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function recordOpeningStock(array $data, Action $action): void
+    {
+        $user = auth()->user();
+        $outlet = $this->resolveOutlet();
+        $variant = $outlet === null ? null : $this->resolveVariant($outlet, $data['variant_id'] ?? null);
+
+        if ($user === null || $outlet === null || $variant === null) {
+            $this->notifyFailure(StockFailureMessage::UNAVAILABLE);
+            $action->cancel();
+
+            return;
+        }
+
+        try {
+            $quantity = StockQuantity::normalize($data['quantity'] ?? null)
+                ?? throw new InvalidArgumentException('The quantity must be a positive decimal string.');
+
+            $movement = app(StockService::class)->recordOpening($user, $outlet, $variant, $quantity, $data['note'] ?? null);
+        } catch (StockException $e) {
+            $this->notifyFailure(StockFailureMessage::describe($e));
+
+            if (in_array($e->reason, self::CORRECTABLE_REASONS, true)) {
+                $action->halt();
+            }
+
+            $action->cancel();
+
+            return;
+        } catch (InvalidArgumentException) {
+            $this->notifyFailure(StockFailureMessage::FALLBACK);
+            $action->halt();
+
+            return;
+        } catch (Throwable $e) {
+            report($e);
+
+            $this->notifyFailure(StockFailureMessage::FALLBACK);
+            $action->cancel();
+
+            return;
+        }
+
+        Notification::make()
+            ->success()
+            ->title('Opening stock recorded')
+            ->body(
+                $this->variantLabel($variant).': opening stock '
+                .StockQuantity::format((string) $movement->quantity_delta)
+                .' recorded. New balance: '.StockQuantity::format((string) $movement->quantity_after).'.'
             )
             ->send();
     }
