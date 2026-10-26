@@ -104,6 +104,7 @@ class DeletionForeignKeyBackstopTest extends TestCase
             'product_variants_product_id_foreign' => 'CASCADE',
             'orders_business_id_foreign' => 'RESTRICT',
             'orders_business_outlet_foreign' => 'RESTRICT',
+            'orders_cancelled_by_foreign' => 'RESTRICT',
             'order_items_order_id_foreign' => 'CASCADE',
             'order_items_product_variant_id_foreign' => 'RESTRICT',
             'stock_levels_outlet_id_foreign' => 'CASCADE',

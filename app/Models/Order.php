@@ -30,6 +30,8 @@ class Order extends Model
         return [
             'status' => OrderStatus::class,
             'completed_at' => 'datetime',
+            'cancelled_at' => 'datetime',
+            'bill_total' => 'decimal:2',
         ];
     }
 
@@ -46,5 +48,20 @@ class Order extends Model
     public function items(): HasMany
     {
         return $this->hasMany(OrderItem::class);
+    }
+
+    public function participants(): HasMany
+    {
+        return $this->hasMany(OrderParticipant::class);
+    }
+
+    public function payments(): HasMany
+    {
+        return $this->hasMany(Payment::class);
+    }
+
+    public function cancelledBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
     }
 }

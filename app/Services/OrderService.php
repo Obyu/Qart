@@ -101,6 +101,10 @@ class OrderService
             $locked = $this->lockOrderForActor($actor, $order);
             $this->assertOpen($locked);
 
+            if ($locked->payment_mode !== null || $locked->bill_total !== null) {
+                throw OrderException::orderAlreadyBilled();
+            }
+
             $freshVariant = ProductVariant::query()
                 ->with('product:id,business_id,name')
                 ->find($variant->getKey());
@@ -216,6 +220,61 @@ class OrderService
             $locked->forceFill([
                 'status' => OrderStatus::Completed,
                 'completed_at' => now(),
+            ])->save();
+
+            return $locked->refresh();
+        }, self::TRANSACTION_ATTEMPTS);
+    }
+
+    /**
+     * Cancel an open order while preserving its items and payment audit history.
+     *
+     * Pending payments are rejected in the same transaction. Any confirmed
+     * payment prevents cancellation. Cancellation never changes stock.
+     *
+     * @throws OrderException
+     */
+    public function cancelOrder(User $actor, Order $order, string $reason): Order
+    {
+        $reason = trim($reason);
+
+        if ($reason === '' || mb_strlen($reason) > 500) {
+            throw OrderException::invalidCancellationReason();
+        }
+
+        return DB::transaction(function () use ($actor, $order, $reason): Order {
+            $locked = $this->lockOrderForActor($actor, $order);
+            $this->assertOpen($locked);
+
+            $hasConfirmedPayment = $locked->payments()
+                ->where('status', 'confirmed')
+                ->lockForUpdate()
+                ->exists();
+
+            if ($hasConfirmedPayment) {
+                throw OrderException::orderHasConfirmedPayment();
+            }
+
+            $now = now();
+
+            $locked->payments()
+                ->where('status', 'pending')
+                ->lockForUpdate()
+                ->get()
+                ->each(function ($payment) use ($actor, $now): void {
+                    $payment->forceFill([
+                        'status' => 'rejected',
+                        'rejected_by' => $actor->getKey(),
+                        'rejected_at' => $now,
+                    ])->save();
+                });
+
+            $locked->forceFill([
+                'status' => OrderStatus::Cancelled,
+                'completed_at' => null,
+                'cancelled_at' => $now,
+                'cancelled_by' => $actor->getKey(),
+                'cancellation_reason' => $reason,
             ])->save();
 
             return $locked->refresh();

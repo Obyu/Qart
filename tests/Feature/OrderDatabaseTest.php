@@ -88,9 +88,57 @@ class OrderDatabaseTest extends TestCase
     public function test_an_unknown_status_is_rejected(): void
     {
         $this->assertRejected(
-            fn () => DB::table('orders')->insert($this->orderRow(['status' => 'cancelled'])),
-            'Only open and completed are valid statuses.'
+            fn () => DB::table('orders')->insert($this->orderRow(['status' => 'refunded'])),
+            'Only open, completed and cancelled are valid statuses.'
         );
+    }
+
+    public function test_a_cancelled_order_requires_complete_audit_metadata(): void
+    {
+        $this->assertRejected(
+            fn () => DB::table('orders')->insert(
+                $this->orderRow(['status' => 'cancelled'])
+            ),
+            'A cancelled order without cancellation metadata should be rejected.'
+        );
+
+        $order = Order::factory()->create();
+
+        $this->assertRejected(
+            fn () => DB::table('orders')->where('id', $order->id)->update([
+                'status' => 'cancelled',
+                'cancelled_at' => now()->toDateTimeString(),
+                'cancelled_by' => null,
+                'cancellation_reason' => 'Customer changed their mind',
+            ]),
+            'A cancelled order without cancelled_by should be rejected.'
+        );
+
+        $this->assertRejected(
+            fn () => DB::table('orders')->where('id', $order->id)->update([
+                'status' => 'cancelled',
+                'cancelled_at' => now()->toDateTimeString(),
+                'cancelled_by' => $order->business->user_id,
+                'cancellation_reason' => '   ',
+            ]),
+            'A cancelled order with a blank reason should be rejected.'
+        );
+
+        $this->assertSame('open', DB::table('orders')->where('id', $order->id)->value('status'));
+    }
+
+    public function test_a_non_cancelled_order_cannot_keep_cancellation_metadata(): void
+    {
+        $order = Order::factory()->create();
+
+        $this->assertRejected(
+            fn () => DB::table('orders')->where('id', $order->id)->update([
+                'cancelled_at' => now()->toDateTimeString(),
+            ]),
+            'An open order must not retain cancellation metadata.'
+        );
+
+        $this->assertSame('open', DB::table('orders')->where('id', $order->id)->value('status'));
     }
 
     public function test_status_and_completed_at_must_agree(): void

@@ -583,6 +583,172 @@ class OrderServiceTest extends TestCase
         ]);
     }
 
+    // Cancellation
+
+    public function test_an_open_order_can_be_cancelled_with_audit_metadata(): void
+    {
+        $order = $this->order();
+        $reason = 'Customer changed their mind';
+
+        $cancelled = $this->service->cancelOrder(
+            $this->owner,
+            $order,
+            $reason,
+        );
+
+        $this->assertSame(OrderStatus::Cancelled, $cancelled->status);
+        $this->assertNotNull($cancelled->cancelled_at);
+        $this->assertSame($this->owner->id, $cancelled->cancelled_by);
+        $this->assertSame($reason, $cancelled->cancellation_reason);
+        $this->assertNull($cancelled->completed_at);
+
+        $this->assertDatabaseHas('orders', [
+            'id' => $order->id,
+            'status' => 'cancelled',
+            'cancelled_by' => $this->owner->id,
+            'cancellation_reason' => $reason,
+        ]);
+    }
+
+    public function test_cancelling_an_order_rejects_pending_qris_and_preserves_payment_audit(): void
+    {
+        $payments = new \App\Services\PaymentService($this->service);
+        $variant = $this->variantFor($this->business, ['price' => '10.00']);
+        $order = $this->service->createOrder($this->owner, $this->business, $this->outlet);
+        $this->service->addItem($this->owner, $order, $variant, 1);
+
+        $billedOrder = $payments->createBill(
+            $this->owner,
+            $order,
+            \App\Services\PaymentService::MODE_DIRECT,
+        );
+
+        $pending = $payments->createQrisPayment(
+            $this->owner,
+            $billedOrder,
+            reference: 'QR-CANCEL-001',
+        );
+
+        $cancelled = $this->service->cancelOrder(
+            $this->owner,
+            $billedOrder,
+            'Duplicate order',
+        );
+
+        $storedPayment = \App\Models\Payment::query()->findOrFail($pending->id);
+
+        $this->assertSame(OrderStatus::Cancelled, $cancelled->status);
+        $this->assertSame('rejected', $storedPayment->status);
+        $this->assertSame($this->owner->id, $storedPayment->rejected_by);
+        $this->assertNotNull($storedPayment->rejected_at);
+        $this->assertSame('QR-CANCEL-001', $storedPayment->qris_reference);
+    }
+
+    public function test_an_open_order_with_a_confirmed_split_payment_cannot_be_cancelled(): void
+    {
+        $payments = new \App\Services\PaymentService($this->service);
+        $variant = $this->variantFor($this->business, ['price' => '10.00']);
+        $order = $this->service->createOrder($this->owner, $this->business, $this->outlet);
+        $this->service->addItem($this->owner, $order, $variant, 3);
+
+        $billedOrder = $payments->createBill(
+            $this->owner,
+            $order,
+            \App\Services\PaymentService::MODE_SPLIT_EQUAL,
+            ['Person A', 'Person B'],
+        );
+
+        $participants = $billedOrder->participants()
+            ->orderBy('position')
+            ->get();
+
+        $confirmedPayment = $payments->payCash(
+            $this->owner,
+            $billedOrder,
+            '15.00',
+            (int) $participants[0]->id,
+        );
+
+        $this->assertSame('confirmed', $confirmedPayment->status);
+        $this->assertSame(OrderStatus::Open, $billedOrder->fresh()->status);
+
+        $this->assertRejectedWith(
+            OrderException::REASON_ORDER_HAS_CONFIRMED_PAYMENT,
+            fn () => $this->service->cancelOrder(
+                $this->owner,
+                $billedOrder,
+                'Customer changed their mind',
+            ),
+        );
+
+        $this->assertSame(OrderStatus::Open, $billedOrder->fresh()->status);
+        $this->assertSame('confirmed', $confirmedPayment->fresh()->status);
+        $this->assertNull($billedOrder->fresh()->cancelled_at);
+        $this->assertDatabaseCount('stock_movements', 0);
+    }
+
+    public function test_cancellation_rejects_empty_or_overlong_reasons(): void
+    {
+        $order = $this->order();
+
+        $this->assertRejectedWith(
+            OrderException::REASON_INVALID_CANCELLATION_REASON,
+            fn () => $this->service->cancelOrder($this->owner, $order, '   '),
+        );
+
+        $this->assertRejectedWith(
+            OrderException::REASON_INVALID_CANCELLATION_REASON,
+            fn () => $this->service->cancelOrder($this->owner, $order, str_repeat('x', 501)),
+        );
+
+        $this->assertSame(OrderStatus::Open, $order->fresh()->status);
+    }
+
+    public function test_another_user_cannot_cancel_an_order(): void
+    {
+        $order = $this->order();
+
+        $this->assertRejectedWith(
+            OrderException::REASON_UNAUTHORIZED,
+            fn () => $this->service->cancelOrder($this->other, $order, 'Not my order'),
+        );
+
+        $this->assertSame(OrderStatus::Open, $order->fresh()->status);
+        $this->assertNull($order->fresh()->cancelled_at);
+    }
+
+    public function test_a_completed_order_cannot_be_cancelled(): void
+    {
+        $variant = $this->variantFor($this->business);
+        $order = $this->order();
+        $this->service->addItem($this->owner, $order, $variant, 1);
+        $completed = $this->service->completeOrder($this->owner, $order);
+
+        $this->assertRejectedWith(
+            OrderException::REASON_ORDER_NOT_OPEN,
+            fn () => $this->service->cancelOrder($this->owner, $completed, 'Too late'),
+        );
+
+        $this->assertSame(OrderStatus::Completed, $completed->fresh()->status);
+    }
+
+    public function test_a_cancelled_order_cannot_be_cancelled_again(): void
+    {
+        $order = $this->service->cancelOrder(
+            $this->owner,
+            $this->order(),
+            'First cancellation',
+        );
+
+        $this->assertRejectedWith(
+            OrderException::REASON_ORDER_NOT_OPEN,
+            fn () => $this->service->cancelOrder($this->owner, $order, 'Second cancellation'),
+        );
+
+        $this->assertSame(OrderStatus::Cancelled, $order->fresh()->status);
+        $this->assertSame('First cancellation', $order->fresh()->cancellation_reason);
+    }
+
     // Rollback
 
     public function test_a_failure_after_the_order_insert_leaves_no_order(): void

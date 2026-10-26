@@ -201,8 +201,8 @@ class FilamentCashierTest extends TestCase
         $this->cashier()
             ->set('orderId', $foreignOrder->id)
             ->call('checkout')
-            ->assertSee('There is no sale in progress.')
-            ->assertDontSee('Rival Cake');
+	->assertSee('Use the payment section to settle this sale. Direct checkout is disabled.')
+	->assertDontSee('Rival Cake');
 
         $this->assertSame(OrderStatus::Open, $foreignOrder->fresh()->status);
         $this->assertSame('10.000', $this->balance($foreignOutlet, $foreignVariant));
@@ -235,8 +235,7 @@ class FilamentCashierTest extends TestCase
         $this->cashier()
             ->set('orderId', $order->id)
             ->call('checkout')
-            ->assertSee('There is no sale in progress.');
-
+	->assertSee('Use the payment section to settle this sale. Direct checkout is disabled.');
         $this->assertSame(OrderStatus::Open, $order->fresh()->status);
         $this->assertSame('10.000', $this->balance($otherOutlet, $variant));
     }
@@ -392,22 +391,29 @@ class FilamentCashierTest extends TestCase
         $variant = $this->variantFor($this->business, 'Latte', 'Large', '3.30');
         $this->stock($this->outlet, $variant, '10');
 
-        $this->cashier()
+        $component = $this->cashier()
             ->set('variantId', $variant->id)
             ->set('quantity', '3')
             ->call('addItem')
-            ->call('checkout')
-            ->assertSee('Sale completed. Total 9.90. Stock has been deducted.')
+            ->call('configureBill')
+            ->assertSee('Bill created. Order items are now frozen.');
+
+        $component
+            ->set('cashReceived', '10.00')
+            ->call('receiveCash')
+            ->assertSee('Cash payment confirmed. Change: 0.10.')
             ->assertSee('Completed')
             ->assertSee('New sale')
             ->assertDontSee('Add to sale')
             ->assertDontSee('Complete sale');
 
         $order = Order::query()->sole();
+
         $this->assertSame(OrderStatus::Completed, $order->status);
         $this->assertNotNull($order->completed_at);
 
         $this->assertSame('7.000', $this->balance($this->outlet, $variant));
+
         // The opening movement plus one sale movement for the single item.
         $this->assertSame(2, StockMovement::query()->count());
     }
@@ -423,10 +429,12 @@ class FilamentCashierTest extends TestCase
         $component->set('variantId', $plenty->id)->set('quantity', '2')->call('addItem');
         $component->set('variantId', $scarce->id)->set('quantity', '5')->call('addItem');
 
-        $component->call('checkout')
-            ->assertSee('Insufficient stock for Cake - Slice')
-            ->assertSee('no stock was deducted')
-            ->assertSee('Complete sale');
+        $component->call('configureBill')
+            ->assertSee('Bill created. Order items are now frozen.');
+
+        $component->set('cashReceived', '100.00')
+            ->call('receiveCash')
+            ->assertSee('Insufficient stock for Cake - Slice');
 
         $order = Order::query()->sole();
         $this->assertSame(OrderStatus::Open, $order->status);
@@ -434,6 +442,7 @@ class FilamentCashierTest extends TestCase
 
         $this->assertSame('10.000', $this->balance($this->outlet, $plenty));
         $this->assertSame('1.000', $this->balance($this->outlet, $scarce));
+
         // Only the two opening movements: no sale movement was written.
         $this->assertSame(2, StockMovement::query()->count());
     }
@@ -442,7 +451,7 @@ class FilamentCashierTest extends TestCase
     {
         $this->cashier()
             ->call('checkout')
-            ->assertSee('There is no sale in progress.');
+            ->assertSee('Use the payment section to settle this sale. Direct checkout is disabled.');
 
         $this->assertDatabaseCount('orders', 0);
     }
@@ -453,11 +462,11 @@ class FilamentCashierTest extends TestCase
         $this->stock($this->outlet, $variant, '10');
         $order = (new OrderService)->createOrder($this->user, $this->business, $this->outlet);
 
-        // The button is disabled for an empty order, but the server must not rely on it.
+        // The server must reject creating a bill for an empty order.
         $this->cashier()
             ->set('orderId', $order->id)
-            ->call('checkout')
-            ->assertSee('The order is empty.');
+            ->call('configureBill')
+            ->assertSee('Add at least one item before creating a bill.');
 
         $this->assertSame(OrderStatus::Open, $order->fresh()->status);
         $this->assertSame('10.000', $this->balance($this->outlet, $variant));
@@ -470,13 +479,22 @@ class FilamentCashierTest extends TestCase
         $this->stock($this->outlet, $variant, '10');
 
         $component = $this->cashier();
-        $component->set('variantId', $variant->id)->set('quantity', '3')->call('addItem');
-        $component->call('checkout')->assertSee('Sale completed.');
+        $component->set('variantId', $variant->id)
+            ->set('quantity', '3')
+            ->call('addItem')
+            ->call('configureBill')
+            ->assertSee('Bill created. Order items are now frozen.');
 
-        $component->call('checkout')->assertSee('already completed');
+        $component->set('cashReceived', '30.00')
+            ->call('receiveCash')
+            ->assertSee('Cash payment confirmed.')
+            ->assertSee('Completed');
 
-        $component
-            ->set('variantId', $variant->id)
+        $component->set('cashReceived', '30.00')
+            ->call('receiveCash')
+            ->assertSee('This sale is no longer open for payment changes.');
+
+        $component->set('variantId', $variant->id)
             ->set('quantity', '1')
             ->call('addItem')
             ->assertSee('already completed');
@@ -493,9 +511,16 @@ class FilamentCashierTest extends TestCase
         $this->stock($this->outlet, $variant, '10');
 
         $component = $this->cashier();
-        $component->set('variantId', $variant->id)->call('addItem');
-        $component->call('checkout')
-            ->call('newSale')
+        $component->set('variantId', $variant->id)
+            ->call('addItem')
+            ->call('configureBill')
+            ->assertSee('Bill created. Order items are now frozen.');
+
+        $component->set('cashReceived', '10.00')
+            ->call('receiveCash')
+            ->assertSee('Cash payment confirmed.');
+
+        $component->call('newSale')
             ->assertSet('orderId', null)
             ->assertSee('No sale in progress.');
 

@@ -26,7 +26,15 @@ class OrderException extends RuntimeException
 
     public const REASON_ORDER_NOT_OPEN = 'order_not_open';
 
+    public const REASON_ORDER_ALREADY_BILLED = 'order_already_billed';
+
+
+
     public const REASON_EMPTY_ORDER = 'empty_order';
+
+    public const REASON_ORDER_HAS_CONFIRMED_PAYMENT = 'order_has_confirmed_payment';
+
+    public const REASON_INVALID_CANCELLATION_REASON = 'invalid_cancellation_reason';
 
     public function __construct(public readonly string $reason, string $message)
     {
@@ -63,8 +71,32 @@ class OrderException extends RuntimeException
         return new self(self::REASON_ORDER_NOT_OPEN, 'The order is not open, so it can no longer change.');
     }
 
+    public static function orderAlreadyBilled(): self
+    {
+        return new self(
+            self::REASON_ORDER_ALREADY_BILLED,
+            'The order items cannot change after billing has started.',
+        );
+    }
+
     public static function emptyOrder(): self
     {
         return new self(self::REASON_EMPTY_ORDER, 'An order without items cannot be completed.');
+    }
+
+    public static function orderHasConfirmedPayment(): self
+    {
+        return new self(
+            self::REASON_ORDER_HAS_CONFIRMED_PAYMENT,
+            'An order with a confirmed payment cannot be cancelled through the ordinary cancellation flow.',
+        );
+    }
+
+    public static function invalidCancellationReason(): self
+    {
+        return new self(
+            self::REASON_INVALID_CANCELLATION_REASON,
+            'A cancellation reason is required and must not exceed 500 characters.',
+        );
     }
 }

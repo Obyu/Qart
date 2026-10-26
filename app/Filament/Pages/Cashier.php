@@ -4,13 +4,17 @@ namespace App\Filament\Pages;
 
 use App\Enums\OrderStatus;
 use App\Exceptions\OrderException;
+use App\Exceptions\PaymentException;
 use App\Exceptions\StockException;
 use App\Models\Business;
 use App\Models\Order;
 use App\Models\Outlet;
+use App\Models\Payment;
 use App\Models\ProductVariant;
 use App\Models\StockLevel;
 use App\Services\OrderService;
+use App\Services\PaymentService;
+use App\Support\Money;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
@@ -55,6 +59,26 @@ class Cashier extends Page
     public string $quantity = '1';
 
     public string|int|null $orderId = null;
+
+    public string $paymentMode = PaymentService::MODE_DIRECT;
+
+    public string $paymentMethod = PaymentService::METHOD_CASH;
+
+    public string $cashReceived = '';
+
+    public string $qrisReference = '';
+
+    public string $splitCount = '2';
+
+    public string $participantNames = '';
+
+    public array $itemSplitParticipants = [];
+
+    public string|int|null $selectedParticipantId = null;
+
+    public string|int|null $pendingPaymentId = null;
+
+    public string $cancellationReason = '';
 
     /** Feedback lives for one request only: it is not synced to the browser. */
     protected ?string $feedbackType = null;
@@ -142,39 +166,307 @@ class Cashier extends Page
     }
 
     /**
-     * Complete the sale of the current order: stock deduction and completion
-     * happen together inside OrderService::completeSale().
+     * Freeze the order contents and create its payment obligations.
      */
-    public function checkout(): void
+    public function configureBill(): void
     {
         $user = auth()->user();
         $business = $this->resolveBusiness();
         $outlet = $this->resolveOutlet($business);
+        $order = $this->resolveOrder($business, $outlet);
 
-        if ($user === null || $business === null || $outlet === null) {
-            $this->showError('Select one of your businesses and an outlet first.');
+        if ($user === null || $order === null) {
+            $this->showError('Select a valid open sale first.');
 
             return;
         }
 
-        $order = $this->resolveOrder($business, $outlet);
+        $participants = [];
 
-        if ($order === null) {
-            $this->showError('There is no sale in progress. Add an item first.');
+        if ($this->paymentMode === PaymentService::MODE_SPLIT_EQUAL) {
+            $participants = array_values(array_filter(
+                array_map('trim', preg_split('/\R/', $this->participantNames) ?: []),
+                static fn (string $name): bool => $name !== '',
+            ));
+        } elseif ($this->paymentMode === PaymentService::MODE_SPLIT_ITEMS) {
+            $this->showError('Item-based split configuration is not available in this cashier step.');
+
+            return;
+        } elseif ($this->paymentMode !== PaymentService::MODE_DIRECT) {
+            $this->showError('Choose a valid payment mode.');
 
             return;
         }
 
         try {
-            $completed = app(OrderService::class)->completeSale($user, $order);
-            $total = $this->presentOrder($completed)['total'];
+            app(PaymentService::class)->createBill(
+                $user,
+                $order,
+                $this->paymentMode,
+                $participants,
+            );
 
-            $this->showSuccess("Sale completed. Total {$total}. Stock has been deducted.");
+            $this->selectedParticipantId = null;
+            $this->pendingPaymentId = null;
+            $this->showSuccess('Bill created. Order items are now frozen.');
+        } catch (PaymentException $e) {
+            $this->showError($this->describePaymentFailure($e));
+        } catch (Throwable $e) {
+            report($e);
+            $this->showError('The bill could not be created. Please try again.');
+        }
+    }
+
+    /**
+     * Receive cash for the direct obligation or selected split participant.
+     */
+    public function receiveCash(): void
+    {
+        $user = auth()->user();
+        $business = $this->resolveBusiness();
+        $outlet = $this->resolveOutlet($business);
+        $order = $this->resolveOrder($business, $outlet);
+
+        if ($user === null || $order === null) {
+            $this->showError('Select a valid sale first.');
+
+            return;
+        }
+
+        $participantId = $this->paymentParticipantId($order);
+
+        if ($participantId === false) {
+            $this->showError('Select a participant for this split payment.');
+
+            return;
+        }
+
+        try {
+            $payment = app(PaymentService::class)->payCash(
+                $user,
+                $order,
+                $this->cashReceived,
+                $participantId,
+            );
+
+            $this->cashReceived = '';
+            $this->showSuccess(
+                'Cash payment confirmed. Change: '.$this->formatMoney($payment->change_amount).'.',
+            );
+        } catch (PaymentException $e) {
+            $this->showError($this->describePaymentFailure($e));
         } catch (OrderException|StockException $e) {
             $this->showError($this->describeFailure($e, $order));
         } catch (Throwable $e) {
             report($e);
-            $this->showError('Something went wrong. Nothing was changed. Please try again.');
+            $this->showError('Cash payment could not be processed. Please check the sale and try again.');
+        }
+    }
+
+    /**
+     * Create a pending QRIS payment. This action does not confirm payment.
+     */
+    public function requestQris(): void
+    {
+        $user = auth()->user();
+        $business = $this->resolveBusiness();
+        $outlet = $this->resolveOutlet($business);
+        $order = $this->resolveOrder($business, $outlet);
+
+        if ($user === null || $order === null) {
+            $this->showError('Select a valid sale first.');
+
+            return;
+        }
+
+        $participantId = $this->paymentParticipantId($order);
+
+        if ($participantId === false) {
+            $this->showError('Select a participant for this split payment.');
+
+            return;
+        }
+
+        try {
+            $payment = app(PaymentService::class)->createQrisPayment(
+                $user,
+                $order,
+                $participantId,
+                $this->qrisReference !== '' ? $this->qrisReference : null,
+            );
+
+            $this->pendingPaymentId = $payment->getKey();
+            $this->qrisReference = '';
+            $this->showSuccess(
+                'QRIS payment #'.$payment->getKey().' is pending. Verify the actual payment before confirming it.',
+            );
+        } catch (PaymentException $e) {
+            $this->showError($this->describePaymentFailure($e));
+        } catch (Throwable $e) {
+            report($e);
+            $this->showError('The QRIS payment request could not be created. Please try again.');
+        }
+    }
+
+    /**
+     * Confirm a pending QRIS payment only after the cashier verifies receipt.
+     */
+    public function confirmQris(mixed $paymentId): void
+    {
+        $user = auth()->user();
+        $business = $this->resolveBusiness();
+        $outlet = $this->resolveOutlet($business);
+        $order = $this->resolveOrder($business, $outlet);
+        $paymentId = $this->positiveInt($paymentId);
+
+        if ($user === null || $order === null || $paymentId === null) {
+            $this->showError('Select a valid pending QRIS payment first.');
+
+            return;
+        }
+
+        try {
+            app(PaymentService::class)->confirmQrisPayment($user, $order, $paymentId);
+            $this->pendingPaymentId = null;
+            $this->showSuccess('QRIS payment confirmed.');
+        } catch (PaymentException $e) {
+            $this->showError($this->describePaymentFailure($e));
+        } catch (OrderException|StockException $e) {
+            $this->showError($this->describeFailure($e, $order));
+        } catch (Throwable $e) {
+            report($e);
+            $this->showError('QRIS confirmation failed. Verify the payment status before retrying.');
+        }
+    }
+
+    /**
+     * Reject a pending QRIS payment while preserving its audit record.
+     */
+    public function rejectQris(mixed $paymentId): void
+    {
+        $user = auth()->user();
+        $business = $this->resolveBusiness();
+        $outlet = $this->resolveOutlet($business);
+        $order = $this->resolveOrder($business, $outlet);
+        $paymentId = $this->positiveInt($paymentId);
+
+        if ($user === null || $order === null || $paymentId === null) {
+            $this->showError('Select a valid pending QRIS payment first.');
+
+            return;
+        }
+
+        try {
+            app(PaymentService::class)->rejectQrisPayment($user, $order, $paymentId);
+            $this->pendingPaymentId = null;
+            $this->showSuccess('QRIS payment rejected. The obligation can be retried.');
+        } catch (PaymentException $e) {
+            $this->showError($this->describePaymentFailure($e));
+        } catch (Throwable $e) {
+            report($e);
+            $this->showError('QRIS rejection failed. Please refresh the sale and try again.');
+        }
+    }
+
+    /**
+     * Return false when a split participant is required but not selected.
+     */
+    private function paymentParticipantId(Order $order): int|null|false
+    {
+        if ($order->payment_mode === PaymentService::MODE_DIRECT) {
+            return null;
+        }
+
+        $participantId = $this->positiveInt($this->selectedParticipantId);
+
+        if (
+            $participantId === null
+            || ! $order->participants()->whereKey($participantId)->exists()
+        ) {
+            return false;
+        }
+
+        return $participantId;
+    }
+
+    private function describePaymentFailure(PaymentException $e): string
+    {
+        return match ($e->reason) {
+            PaymentException::REASON_UNAUTHORIZED,
+            PaymentException::REASON_NOT_FOUND => 'That payment action is not allowed for this sale.',
+            PaymentException::REASON_ORDER_NOT_OPEN => 'This sale is no longer open for payment changes.',
+            PaymentException::REASON_ORDER_ALREADY_BILLED => 'A bill already exists for this sale.',
+            PaymentException::REASON_EMPTY_ORDER => 'Add at least one item before creating a bill.',
+            PaymentException::REASON_INVALID_MODE => 'Choose a valid payment mode.',
+            PaymentException::REASON_INVALID_METHOD => 'Choose cash or QRIS.',
+            PaymentException::REASON_INVALID_AMOUNT => $e->getMessage(),
+            PaymentException::REASON_INVALID_PARTICIPANT => 'Choose valid split participants.',
+            PaymentException::REASON_INVALID_ALLOCATION,
+            PaymentException::REASON_ALLOCATION_MISMATCH => 'The split allocation is invalid. Check the participants and quantities.',
+            PaymentException::REASON_PAYMENT_ALREADY_EXISTS => 'An active payment already exists for this obligation.',
+            PaymentException::REASON_PAYMENT_NOT_PENDING => 'This payment is no longer pending.',
+            PaymentException::REASON_INSUFFICIENT_CASH => 'The cash received must be at least the amount due.',
+            PaymentException::REASON_QRIS_CONFIRMATION_REQUIRED => 'Verify the actual QRIS payment before confirming it.',
+            PaymentException::REASON_OBLIGATION_NOT_SETTLED,
+            PaymentException::REASON_ORDER_NOT_SETTLED => 'The full bill has not been paid yet.',
+            default => 'The payment could not be processed. Please refresh and try again.',
+        };
+    }
+
+    /**
+     * Complete the sale of the current order: stock deduction and completion
+     * happen together inside OrderService::completeSale().
+     */
+    public function checkout(): void
+    {
+        $this->showError('Use the payment section to settle this sale. Direct checkout is disabled.');
+    }
+
+    /**
+     * Cancel the current open order through the domain service.
+     * The service owns status/payment writes and enforces cancellation rules.
+     */
+    public function cancelOrder(): void
+    {
+        $user = auth()->user();
+        $business = $this->resolveBusiness();
+        $outlet = $this->resolveOutlet($business);
+        $order = $this->resolveOrder($business, $outlet);
+
+        if ($user === null || $order === null) {
+            $this->showError('Select a valid open sale before cancelling it.');
+
+            return;
+        }
+
+        try {
+            app(OrderService::class)->cancelOrder(
+                $user,
+                $order,
+                $this->cancellationReason,
+            );
+
+            $this->cancellationReason = '';
+            $this->showSuccess('Sale cancelled. Items and payment history have been preserved.');
+        } catch (OrderException $e) {
+            $message = match ($e->reason) {
+                OrderException::REASON_INVALID_CANCELLATION_REASON =>
+                    'Enter a cancellation reason of 1–500 characters.',
+                OrderException::REASON_ORDER_HAS_CONFIRMED_PAYMENT =>
+                    'This sale has a confirmed payment and cannot be cancelled through this flow.',
+                OrderException::REASON_ORDER_NOT_OPEN =>
+                    'This sale is no longer open and cannot be cancelled.',
+                OrderException::REASON_UNAUTHORIZED,
+                OrderException::REASON_NOT_FOUND,
+                OrderException::REASON_BUSINESS_MISMATCH =>
+                    'That cancellation is not allowed for the selected sale.',
+                default => 'The sale could not be cancelled. Please refresh and try again.',
+            };
+
+            $this->showError($message);
+        } catch (Throwable $e) {
+            report($e);
+            $this->showError('Cancellation failed. Verify the sale status before retrying.');
         }
     }
 
@@ -196,11 +488,48 @@ class Cashier extends Page
         $outlet = $this->resolveOutlet($business);
         $order = $this->resolveOrder($business, $outlet);
 
+        $participants = [];
+        $payments = [];
+
+        if ($order !== null) {
+            $participants = $order->participants()
+                ->orderBy('position')
+                ->get()
+                ->map(fn ($participant) => [
+                    'id' => $participant->getKey(),
+                    'name' => $participant->name,
+                    'amount' => $this->formatMoney((string) $participant->total_amount),
+                ])
+                ->all();
+
+            $payments = $order->payments()
+                ->with('participant:id,name')
+                ->orderBy('id')
+                ->get()
+                ->map(fn ($payment) => [
+                    'id' => $payment->getKey(),
+                    'participant' => $payment->participant?->name,
+                    'method' => (string) $payment->method,
+                    'status' => (string) $payment->status,
+                    'amount' => $this->formatMoney((string) $payment->amount),
+                    'amountReceived' => $payment->amount_received === null
+                        ? null
+                        : $this->formatMoney((string) $payment->amount_received),
+                    'change' => $this->formatMoney((string) $payment->change_amount),
+                    'qrisReference' => $payment->qris_reference,
+                    'confirmedAt' => $payment->confirmed_at?->format('Y-m-d H:i'),
+                    'rejectedAt' => $payment->rejected_at?->format('Y-m-d H:i'),
+                ])
+                ->all();
+        }
+
         return [
             'businessOptions' => auth()->user()?->businesses()->orderBy('name')->pluck('name', 'id')->all() ?? [],
             'outletOptions' => $business?->outlets()->orderBy('name')->pluck('name', 'id')->all() ?? [],
             'variantOptions' => $this->variantOptions($business, $outlet),
             'order' => $order === null ? null : $this->presentOrder($order),
+            'participants' => $participants,
+            'payments' => $payments,
             'feedback' => $this->feedbackMessage === null
                 ? null
                 : ['type' => $this->feedbackType, 'message' => $this->feedbackMessage],
@@ -212,6 +541,15 @@ class Cashier extends Page
         $this->orderId = null;
         $this->variantId = null;
         $this->quantity = '1';
+        $this->paymentMode = PaymentService::MODE_DIRECT;
+        $this->paymentMethod = PaymentService::METHOD_CASH;
+        $this->cashReceived = '';
+        $this->qrisReference = '';
+        $this->splitCount = '2';
+        $this->participantNames = '';
+        $this->itemSplitParticipants = [];
+        $this->selectedParticipantId = null;
+        $this->pendingPaymentId = null;
     }
 
     private function preselectOutlet(): void
@@ -351,7 +689,7 @@ class Cashier extends Page
      * calculated here from the persisted price snapshots and quantities, using
      * BCMath strings, never floats.
      *
-     * @return array{id: int, isOpen: bool, completedAt: string|null, hasItems: bool, lines: list<array<string, mixed>>, total: string}
+     * @return array{id: int, isOpen: bool, completedAt: string|null, hasItems: bool, billConfigured: bool, paymentMode: string|null, billTotal: string|null, lines: list<array<string, mixed>>, total: string}
      */
     private function presentOrder(Order $order): array
     {
@@ -371,11 +709,21 @@ class Cashier extends Page
             ];
         }
 
+        $billConfigured = $order->payment_mode !== null && $order->bill_total !== null;
+
         return [
             'id' => $order->getKey(),
             'isOpen' => $order->status === OrderStatus::Open,
+            'isCancelled' => $order->status === OrderStatus::Cancelled,
             'completedAt' => $order->completed_at?->format('Y-m-d H:i'),
+            'cancelledAt' => $order->cancelled_at?->format('Y-m-d H:i'),
+            'cancellationReason' => $order->cancellation_reason,
             'hasItems' => $lines !== [],
+            'billConfigured' => $billConfigured,
+            'paymentMode' => $order->payment_mode === null ? null : (string) $order->payment_mode,
+            'billTotal' => $order->bill_total === null
+                ? null
+                : $this->formatMoney((string) $order->bill_total),
             'lines' => $lines,
             'total' => $this->formatMoney($total),
         ];
