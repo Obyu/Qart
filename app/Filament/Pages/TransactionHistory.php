@@ -57,7 +57,7 @@ class TransactionHistory extends Page implements HasTable
                 TextColumn::make('bill_total')
                     ->label('Total')
                     ->state(fn (Order $record): string => $this->formatRupiah(
-                        $record->bill_total ?? '0',
+                        $record->bill_total ?? $this->itemsTotal($record),
                     )),
 
                 TextColumn::make('status')
@@ -66,11 +66,13 @@ class TransactionHistory extends Page implements HasTable
                     ->formatStateUsing(fn ($state): string => match ($state instanceof \BackedEnum ? $state->value : $state) {
                         'open' => 'Open',
                         'completed' => 'Completed',
+                        'cancelled' => 'Cancelled',
                         default => (string) ($state instanceof \BackedEnum ? $state->value : $state),
                     })
                     ->color(fn ($state): string => match ($state instanceof \BackedEnum ? $state->value : $state) {
                         'completed' => 'success',
                         'open' => 'warning',
+                        'cancelled' => 'danger',
                         default => 'gray',
                     }),
 
@@ -84,6 +86,7 @@ class TransactionHistory extends Page implements HasTable
                     ->options([
                         'open' => 'Open',
                         'completed' => 'Completed',
+                        'cancelled' => 'Cancelled',
                     ]),
 
                 SelectFilter::make('payments.method')
@@ -157,7 +160,7 @@ class TransactionHistory extends Page implements HasTable
             )
             ->with([
                 'outlet:id,name',
-                'items:id,order_id,quantity',
+                'items:id,order_id,unit_price,quantity',
                 'payments:id,order_id,method,status',
             ]);
     }
@@ -177,6 +180,17 @@ class TransactionHistory extends Page implements HasTable
             })
             ->unique()
             ->implode(', ');
+    }
+
+    private function itemsTotal(Order $order): string
+    {
+        if ($order->items->isEmpty()) {
+            return '0';
+        }
+
+        return \App\Support\Money::sum($order->items->map(
+            fn ($item): string => \App\Support\Money::mulQuantity((string) $item->unit_price, $item->quantity),
+        ));
     }
 
     private function formatRupiah(string|int|float $amount): string

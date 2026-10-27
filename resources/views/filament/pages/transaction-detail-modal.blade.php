@@ -14,6 +14,14 @@
         default => 'warning',
     };
 
+    $billTotal = $order->bill_total ?? (
+        $order->items->isEmpty()
+            ? '0'
+            : \App\Support\Money::sum($order->items->map(
+                fn ($item): string => \App\Support\Money::mulQuantity((string) $item->unit_price, $item->quantity),
+            ))
+    );
+
     $orderStatus = $order->status instanceof \BackedEnum
         ? $order->status->value
         : $order->status;
@@ -62,8 +70,21 @@
 
         <div class="mt-5 rounded-lg bg-gray-50 p-4 dark:bg-white/5">
             <p class="text-xs font-medium text-gray-500">Bill total</p>
-            <p class="mt-1 text-2xl font-bold tracking-tight">{{ $money($order->bill_total) }}</p>
+            <p class="mt-1 text-2xl font-bold tracking-tight">{{ $money($billTotal) }}</p>
         </div>
+
+        @if ($orderStatus === 'cancelled')
+            <div class="mt-5 space-y-3 rounded-lg bg-gray-50 p-4 dark:bg-white/5">
+                <div>
+                    <p class="text-xs font-medium text-gray-500">Cancelled at</p>
+                    <p class="mt-1">{{ $order->cancelled_at?->format('d M Y, H:i') ?? '—' }}</p>
+                </div>
+                <div>
+                    <p class="text-xs font-medium text-gray-500">Reason for cancellation</p>
+                    <p class="mt-1">{{ $order->cancellation_reason ?? '—' }}</p>
+                </div>
+            </div>
+        @endif
     </x-filament::section>
 
     {{-- Items --}}
