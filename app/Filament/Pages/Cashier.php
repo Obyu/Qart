@@ -2,6 +2,7 @@
 
 namespace App\Filament\Pages;
 
+use App\Enums\BusinessAbility;
 use App\Enums\OrderStatus;
 use App\Exceptions\OrderException;
 use App\Exceptions\PaymentException;
@@ -12,9 +13,10 @@ use App\Models\Outlet;
 use App\Models\Payment;
 use App\Models\ProductVariant;
 use App\Models\StockLevel;
+use App\Models\User;
 use App\Services\OrderService;
 use App\Services\PaymentService;
-use App\Support\Money;
+use App\Support\BusinessAccess;
 use BackedEnum;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
@@ -37,6 +39,70 @@ use Throwable;
  */
 class Cashier extends Page
 {
+    public static function canAccess(): bool
+    {
+        $user = auth()->user();
+
+        if (! $user instanceof User) {
+            return false;
+        }
+
+        $ownedBusinessIds = $user->businesses()
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+
+        $hasStaffAttributes = $user->role !== null
+            || $user->business_id !== null
+            || $user->outlet_id !== null;
+
+        if ($ownedBusinessIds !== [] && $hasStaffAttributes) {
+            return false;
+        }
+
+        if ($ownedBusinessIds === [] && ! $hasStaffAttributes) {
+            return true;
+        }
+
+        $access = app(BusinessAccess::class);
+        $businessIds = $ownedBusinessIds;
+
+        if ($user->business_id !== null) {
+            $businessIds[] = (int) $user->business_id;
+        }
+
+        foreach (array_unique($businessIds) as $businessId) {
+            $outletIds = $user->outlet_id !== null
+                ? [(int) $user->outlet_id]
+                : Outlet::query()
+                    ->where('business_id', $businessId)
+                    ->pluck('id')
+                    ->map(static fn ($id): int => (int) $id)
+                    ->all();
+
+            foreach ($outletIds as $outletId) {
+                if (
+                    $access->can(
+                        $user,
+                        BusinessAbility::CreateOrder,
+                        $businessId,
+                        $outletId,
+                    )
+                    && $access->can(
+                        $user,
+                        BusinessAbility::ManagePayment,
+                        $businessId,
+                        $outletId,
+                    )
+                ) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedShoppingCart;
 
     protected static ?string $navigationLabel = 'Cashier';
@@ -87,11 +153,17 @@ class Cashier extends Page
 
     public function mount(): void
     {
-        $businesses = auth()->user()?->businesses()->limit(2)->get();
+        $businesses = $this->accessibleBusinesses()->orderBy('name')->limit(2)->get();
 
-        if ($businesses !== null && $businesses->count() === 1) {
+        if ($businesses->count() === 1) {
             $this->businessId = $businesses->first()->getKey();
             $this->preselectOutlet();
+        }
+
+        $user = auth()->user();
+
+        if ($user instanceof User && $user->role === 'cashier') {
+            $this->outletId = $user->outlet_id;
         }
     }
 
@@ -450,16 +522,12 @@ class Cashier extends Page
             $this->showSuccess('Sale cancelled. Items and payment history have been preserved.');
         } catch (OrderException $e) {
             $message = match ($e->reason) {
-                OrderException::REASON_INVALID_CANCELLATION_REASON =>
-                    'Enter a cancellation reason of 1–500 characters.',
-                OrderException::REASON_ORDER_HAS_CONFIRMED_PAYMENT =>
-                    'This sale has a confirmed payment and cannot be cancelled through this flow.',
-                OrderException::REASON_ORDER_NOT_OPEN =>
-                    'This sale is no longer open and cannot be cancelled.',
+                OrderException::REASON_INVALID_CANCELLATION_REASON => 'Enter a cancellation reason of 1–500 characters.',
+                OrderException::REASON_ORDER_HAS_CONFIRMED_PAYMENT => 'This sale has a confirmed payment and cannot be cancelled through this flow.',
+                OrderException::REASON_ORDER_NOT_OPEN => 'This sale is no longer open and cannot be cancelled.',
                 OrderException::REASON_UNAUTHORIZED,
                 OrderException::REASON_NOT_FOUND,
-                OrderException::REASON_BUSINESS_MISMATCH =>
-                    'That cancellation is not allowed for the selected sale.',
+                OrderException::REASON_BUSINESS_MISMATCH => 'That cancellation is not allowed for the selected sale.',
                 default => 'The sale could not be cancelled. Please refresh and try again.',
             };
 
@@ -524,8 +592,8 @@ class Cashier extends Page
         }
 
         return [
-            'businessOptions' => auth()->user()?->businesses()->orderBy('name')->pluck('name', 'id')->all() ?? [],
-            'outletOptions' => $business?->outlets()->orderBy('name')->pluck('name', 'id')->all() ?? [],
+            'businessOptions' => $this->accessibleBusinesses()->orderBy('name')->pluck('name', 'id')->all(),
+            'outletOptions' => $this->accessibleOutlets($business)->orderBy('name')->pluck('name', 'id')->all(),
             'variantOptions' => $this->variantOptions($business, $outlet),
             'order' => $order === null ? null : $this->presentOrder($order),
             'participants' => $participants,
@@ -554,9 +622,23 @@ class Cashier extends Page
 
     private function preselectOutlet(): void
     {
-        $outlets = $this->resolveBusiness()?->outlets()->limit(2)->get();
+        $business = $this->resolveBusiness();
 
-        if ($outlets !== null && $outlets->count() === 1) {
+        if ($business === null) {
+            return;
+        }
+
+        $user = auth()->user();
+
+        if ($user instanceof User && $user->role === 'cashier') {
+            $this->outletId = $user->outlet_id;
+
+            return;
+        }
+
+        $outlets = $this->accessibleOutlets($business)->limit(2)->get();
+
+        if ($outlets->count() === 1) {
             $this->outletId = $outlets->first()->getKey();
         }
     }
@@ -566,22 +648,98 @@ class Cashier extends Page
         $id = $this->positiveInt($this->businessId);
         $user = auth()->user();
 
-        if ($id === null || $user === null) {
+        if ($id === null || ! $user instanceof User) {
             return null;
         }
 
-        return $user->businesses()->whereKey($id)->first();
+        return $this->accessibleBusinesses()->whereKey($id)->first();
     }
 
     private function resolveOutlet(?Business $business): ?Outlet
     {
         $id = $this->positiveInt($this->outletId);
+        $user = auth()->user();
 
-        if ($business === null || $id === null) {
+        if ($business === null || $id === null || ! $user instanceof User) {
             return null;
         }
 
-        return $business->outlets()->whereKey($id)->first();
+        $outlet = $this->accessibleOutlets($business)->whereKey($id)->first();
+
+        if ($outlet === null) {
+            return null;
+        }
+
+        $access = app(BusinessAccess::class);
+
+        if (
+            ! $access->can($user, BusinessAbility::CreateOrder, (int) $business->getKey(), (int) $outlet->getKey())
+            || ! $access->can($user, BusinessAbility::ManagePayment, (int) $business->getKey(), (int) $outlet->getKey())
+        ) {
+            return null;
+        }
+
+        return $outlet;
+    }
+
+    private function accessibleBusinesses(): Builder
+    {
+        $user = auth()->user();
+        $query = Business::query();
+
+        if (! $user instanceof User) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        if (
+            $user->role === null
+            && $user->business_id === null
+            && $user->outlet_id === null
+        ) {
+            return $query->where('user_id', $user->getKey());
+        }
+
+        if ($user->role === 'cashier' && $user->business_id !== null) {
+            $access = app(BusinessAccess::class);
+            $businessId = (int) $user->business_id;
+            $outletId = $user->outlet_id === null ? null : (int) $user->outlet_id;
+
+            if (
+                $outletId !== null
+                && $access->can($user, BusinessAbility::CreateOrder, $businessId, $outletId)
+                && $access->can($user, BusinessAbility::ManagePayment, $businessId, $outletId)
+            ) {
+                return $query->whereKey($businessId);
+            }
+        }
+
+        return $query->whereRaw('1 = 0');
+    }
+
+    private function accessibleOutlets(?Business $business): Builder
+    {
+        $query = Outlet::query();
+
+        if ($business === null) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        $query->where('business_id', $business->getKey());
+        $user = auth()->user();
+
+        if (! $user instanceof User) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        if ($user->role === null) {
+            return $query;
+        }
+
+        if ($user->role === 'cashier' && $user->outlet_id !== null) {
+            return $query->whereKey((int) $user->outlet_id);
+        }
+
+        return $query->whereRaw('1 = 0');
     }
 
     private function resolveVariant(Business $business): ?ProductVariant

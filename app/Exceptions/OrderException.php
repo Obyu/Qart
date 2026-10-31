@@ -28,8 +28,6 @@ class OrderException extends RuntimeException
 
     public const REASON_ORDER_ALREADY_BILLED = 'order_already_billed';
 
-
-
     public const REASON_EMPTY_ORDER = 'empty_order';
 
     public const REASON_ORDER_HAS_CONFIRMED_PAYMENT = 'order_has_confirmed_payment';

@@ -2,12 +2,13 @@
 
 namespace App\Services;
 
+use App\Enums\BusinessAbility;
 use App\Exceptions\PaymentException;
 use App\Models\Order;
-use App\Models\OrderParticipant;
-use App\Models\OrderParticipantItem;
+use App\Models\OrderItem;
 use App\Models\Payment;
 use App\Models\User;
+use App\Support\BusinessAccess;
 use App\Support\Money;
 use Illuminate\Support\Facades\DB;
 
@@ -37,9 +38,14 @@ class PaymentService
 
     private const TRANSACTION_ATTEMPTS = 5;
 
+    private readonly BusinessAccess $access;
+
     public function __construct(
         private readonly ?OrderService $orders = null,
-    ) {}
+        ?BusinessAccess $access = null,
+    ) {
+        $this->access = $access ?? new BusinessAccess;
+    }
 
     /**
      * Configure a bill for an order.
@@ -56,7 +62,7 @@ class PaymentService
      * For split_equal, provide participant names:
      * ['Person A', 'Person B']
      *
-     * @param array<int, mixed> $participants
+     * @param  array<int, mixed>  $participants
      */
     public function createBill(
         User $actor,
@@ -485,8 +491,8 @@ class PaymentService
      * Create an item-based split and verify every item quantity is allocated
      * exactly once across all participants.
      *
-     * @param iterable<\App\Models\OrderItem> $items
-     * @param array<int, mixed> $participants
+     * @param  iterable<OrderItem>  $items
+     * @param  array<int, mixed>  $participants
      */
     private function createItemSplit(Order $order, iterable $items, array $participants): void
     {
@@ -603,15 +609,20 @@ class PaymentService
             throw PaymentException::notFound();
         }
 
-        $ownerId = DB::table('businesses')
+        $businessExists = DB::table('businesses')
             ->where('id', $locked->business_id)
-            ->value('user_id');
+            ->exists();
 
-        if ($ownerId === null) {
+        if (! $businessExists) {
             throw PaymentException::notFound();
         }
 
-        if ((int) $ownerId !== (int) $actor->getKey()) {
+        if (! $this->access->can(
+            $actor,
+            BusinessAbility::ManagePayment,
+            (int) $locked->business_id,
+            (int) $locked->outlet_id,
+        )) {
             throw PaymentException::unauthorized();
         }
 

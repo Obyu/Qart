@@ -2,12 +2,15 @@
 
 namespace App\Filament\Pages;
 
+use App\Enums\BusinessAbility;
 use App\Exceptions\StockException;
 use App\Filament\Support\StockFailureMessage;
 use App\Filament\Support\StockQuantity;
 use App\Models\Outlet;
 use App\Models\ProductVariant;
+use App\Models\User;
 use App\Services\StockService;
+use App\Support\BusinessAccess;
 use BackedEnum;
 use Closure;
 use Filament\Actions\Action;
@@ -34,8 +37,9 @@ use Throwable;
  * Security model (same as Cashier): $outletId and the variant chosen in the
  * Adjust Stock and Record Opening Stock forms are client-controlled and are
  * never trusted. The outlet is
- * re-resolved from the database, scoped to outlets of businesses owned by the
- * authenticated user, when it changes (updatedOutletId), on every render
+ * re-resolved from the database, scoped to outlets of the businesses in which
+ * the authenticated user may manage stock (see accessibleOutlets()), when it
+ * changes (updatedOutletId), on every render
  * (getViewData), whenever the table query is built (stockQuery), and again when
  * the action form is validated and submitted. The variant is re-resolved
  * through the outlet's business at validation and again at submission. An ID
@@ -74,7 +78,7 @@ class StockManagement extends Page implements HasTable
 
     public function mount(): void
     {
-        $ids = $this->ownedOutlets()->limit(2)->pluck('id');
+        $ids = $this->accessibleOutlets()->limit(2)->pluck('id');
 
         if ($ids->count() === 1) {
             $this->outletId = $ids->first();
@@ -464,21 +468,24 @@ class StockManagement extends Page implements HasTable
     }
 
     /**
-     * Outlets of businesses owned by the authenticated user. The only source
-     * of outlets for both the dropdown and the ownership check.
+     * Outlets of the businesses in which the authenticated user may manage
+     * stock: every business of an owner, or the one business of a business
+     * admin. BusinessAccess decides; nothing here widens it. The only source of
+     * outlets for the dropdown, the preselection and the outlet check.
      *
      * @return Builder<Outlet>
      */
-    private function ownedOutlets(): Builder
+    private function accessibleOutlets(): Builder
     {
         $user = auth()->user();
 
-        if ($user === null) {
+        if (! $user instanceof User) {
             return Outlet::query()->whereKey([]);
         }
 
-        return Outlet::query()
-            ->whereHas('business', fn (Builder $query) => $query->where('user_id', $user->getKey()));
+        $businessIds = app(BusinessAccess::class)->businessIdsFor($user, BusinessAbility::ManageStock);
+
+        return Outlet::query()->whereIn('business_id', $businessIds);
     }
 
     private function resolveOutlet(): ?Outlet
@@ -489,7 +496,7 @@ class StockManagement extends Page implements HasTable
             return null;
         }
 
-        return $this->ownedOutlets()->whereKey($id)->first();
+        return $this->accessibleOutlets()->whereKey($id)->first();
     }
 
     /**
@@ -497,7 +504,7 @@ class StockManagement extends Page implements HasTable
      */
     private function outletOptions(): array
     {
-        return $this->ownedOutlets()
+        return $this->accessibleOutlets()
             ->with('business:id,name')
             ->get()
             ->sortBy(fn (Outlet $outlet): string => mb_strtolower($outlet->business?->name.' '.$outlet->name))
@@ -519,5 +526,19 @@ class StockManagement extends Page implements HasTable
         }
 
         return null;
+    }
+
+    public static function canAccess(): bool
+    {
+        $user = auth()->user();
+
+        if (! $user instanceof User) {
+            return false;
+        }
+
+        // An owner (no staff attributes) may always open the page, even before the
+        // first business exists. Staff are admitted only through BusinessAccess.
+        return $user->isOwner()
+            || app(BusinessAccess::class)->businessIdsFor($user, BusinessAbility::ManageStock) !== [];
     }
 }

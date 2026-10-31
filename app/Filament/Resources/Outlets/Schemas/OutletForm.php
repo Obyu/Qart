@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Outlets\Schemas;
 
+use App\Filament\Resources\Outlets\OutletResource;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Schemas\Schema;
@@ -12,6 +13,8 @@ class OutletForm
 {
     public static function configure(Schema $schema): Schema
     {
+        $businessIds = OutletResource::accessibleBusinessIds();
+
         return $schema
             ->components([
                 Select::make('business_id')
@@ -19,10 +22,10 @@ class OutletForm
                     ->relationship(
                         name: 'business',
                         titleAttribute: 'name',
-                        modifyQueryUsing: fn (Builder $query) => $query->where('user_id', auth()->id()),
+                        modifyQueryUsing: fn (Builder $query) => $query->whereIn('id', $businessIds),
                     )
                     ->rules([
-                        Rule::exists('businesses', 'id')->where('user_id', auth()->id()),
+                        Rule::exists('businesses', 'id')->whereIn('id', $businessIds),
                     ])
                     ->searchable()
                     ->preload()

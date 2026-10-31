@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Products\Schemas;
 
+use App\Filament\Resources\Products\ProductResource;
 use App\Models\Category;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -13,6 +14,8 @@ class ProductForm
 {
     public static function configure(Schema $schema): Schema
     {
+        $businessIds = ProductResource::accessibleBusinessIds();
+
         return $schema
             ->components([
                 Select::make('category_id')
@@ -22,21 +25,13 @@ class ProductForm
                         titleAttribute: 'name',
                         modifyQueryUsing: fn (Builder $query) => $query
                             ->with('business')
-                            ->whereHas('business', fn (Builder $business) => $business->where('user_id', auth()->id())),
+                            ->whereIn('business_id', $businessIds),
                     )
                     ->getOptionLabelFromRecordUsing(
                         fn (Category $record): string => "{$record->name} ({$record->business->name})"
                     )
                     ->rules([
-                        Rule::exists('categories', 'id')->where(
-                            fn ($query) => $query->whereIn(
-                                'business_id',
-                                fn ($businesses) => $businesses
-                                    ->select('id')
-                                    ->from('businesses')
-                                    ->where('user_id', auth()->id())
-                            )
-                        ),
+                        Rule::exists('categories', 'id')->whereIn('business_id', $businessIds),
                     ])
                     ->searchable()
                     ->preload()

@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\ProductVariants\Schemas;
 
+use App\Filament\Resources\ProductVariants\ProductVariantResource;
 use App\Models\Product;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -13,6 +14,8 @@ class ProductVariantForm
 {
     public static function configure(Schema $schema): Schema
     {
+        $businessIds = ProductVariantResource::accessibleBusinessIds();
+
         return $schema
             ->components([
                 Select::make('product_id')
@@ -22,22 +25,14 @@ class ProductVariantForm
                         titleAttribute: 'name',
                         modifyQueryUsing: fn (Builder $query) => $query
                             ->with(['category', 'business'])
-                            ->whereHas('business', fn (Builder $business) => $business->where('user_id', auth()->id())),
+                            ->whereIn('business_id', $businessIds),
                     )
                     ->getOptionLabelFromRecordUsing(
                         fn (Product $record): string => "{$record->name} — {$record->category->name} ({$record->business->name})"
                     )
                     ->searchable(['name'])
                     ->rules([
-                        Rule::exists('products', 'id')->where(
-                            fn ($query) => $query->whereIn(
-                                'business_id',
-                                fn ($businesses) => $businesses
-                                    ->select('id')
-                                    ->from('businesses')
-                                    ->where('user_id', auth()->id())
-                            )
-                        ),
+                        Rule::exists('products', 'id')->whereIn('business_id', $businessIds),
                     ])
                     ->required()
                     ->hidden(fn (string $operation): bool => $operation === 'edit'),

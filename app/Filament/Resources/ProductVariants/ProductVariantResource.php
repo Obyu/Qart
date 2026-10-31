@@ -2,11 +2,13 @@
 
 namespace App\Filament\Resources\ProductVariants;
 
+use App\Enums\BusinessAbility;
 use App\Filament\Resources\ProductVariants\Pages\CreateProductVariant;
 use App\Filament\Resources\ProductVariants\Pages\EditProductVariant;
 use App\Filament\Resources\ProductVariants\Pages\ListProductVariants;
 use App\Filament\Resources\ProductVariants\Schemas\ProductVariantForm;
 use App\Filament\Resources\ProductVariants\Tables\ProductVariantsTable;
+use App\Filament\Support\AuthorizesByBusinessAbility;
 use App\Models\ProductVariant;
 use BackedEnum;
 use Filament\Resources\Resource;
@@ -17,16 +19,23 @@ use Illuminate\Database\Eloquent\Builder;
 
 class ProductVariantResource extends Resource
 {
+    use AuthorizesByBusinessAbility;
+
     protected static ?string $model = ProductVariant::class;
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleStack;
 
     protected static ?string $recordTitleAttribute = 'name';
 
+    protected static function requiredAbility(): BusinessAbility
+    {
+        return BusinessAbility::ManageCatalog;
+    }
+
     public static function getEloquentQuery(): Builder
     {
         return parent::getEloquentQuery()
-            ->whereHas('product.business', fn (Builder $query) => $query->where('user_id', auth()->id()));
+            ->whereHas('product', fn (Builder $query) => $query->whereIn('business_id', static::accessibleBusinessIds()));
     }
 
     public static function form(Schema $schema): Schema

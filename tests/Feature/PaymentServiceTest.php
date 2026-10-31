@@ -255,8 +255,6 @@ class PaymentServiceTest extends TestCase
         $this->assertSame(1, Payment::query()->where('order_id', $order->id)->count());
     }
 
-
-
     public function test_rejected_qris_can_be_retried_without_losing_audit_history(): void
     {
         $variant = $this->variant('10.00');
@@ -447,5 +445,4 @@ class PaymentServiceTest extends TestCase
             Payment::query()->where('order_id', $order->id)->count(),
         );
     }
-
 }

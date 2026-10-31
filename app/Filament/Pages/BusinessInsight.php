@@ -47,4 +47,11 @@ class BusinessInsight extends Page
         $this->insightText = $result['text'];
         $this->insightSource = $result['source'];
     }
+
+    public static function canAccess(): bool
+    {
+        $user = auth()->user();
+
+        return $user instanceof User && $user->isOwner();
+    }
 }

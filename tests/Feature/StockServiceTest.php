@@ -557,6 +557,7 @@ class StockServiceTest extends TestCase
     public function test_the_service_exposes_no_way_to_edit_or_delete_movements(): void
     {
         $methods = collect((new ReflectionClass(StockService::class))->getMethods(ReflectionMethod::IS_PUBLIC))
+            ->reject(fn (ReflectionMethod $method) => $method->getName() === '__construct')
             ->map(fn (ReflectionMethod $method) => $method->getName())
             ->sort()
             ->values()

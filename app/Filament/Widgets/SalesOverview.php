@@ -154,4 +154,11 @@ class SalesOverview extends StatsOverviewWidget
 
         return $whole.'.'.str_pad(substr($fraction, 0, 2), 2, '0');
     }
+
+    public static function canView(): bool
+    {
+        $user = auth()->user();
+
+        return $user instanceof User && $user->isOwner();
+    }
 }

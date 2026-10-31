@@ -96,6 +96,19 @@ class FilamentCashierTest extends TestCase
             ->assertSee('Kopi Qart');
     }
 
+    public function test_cashier_access_is_denied_when_role_is_null_but_staff_attributes_exist(): void
+    {
+        $user = (new User)->forceFill([
+            'role' => null,
+            'business_id' => $this->business->id,
+            'outlet_id' => $this->outlet->id,
+        ]);
+
+        $this->actingAs($user);
+
+        $this->assertFalse(Cashier::canAccess());
+    }
+
     public function test_a_user_without_a_business_sees_guidance_and_nobody_elses_data(): void
     {
         $this->actingAs(User::factory()->create());
@@ -201,8 +214,8 @@ class FilamentCashierTest extends TestCase
         $this->cashier()
             ->set('orderId', $foreignOrder->id)
             ->call('checkout')
-	->assertSee('Use the payment section to settle this sale. Direct checkout is disabled.')
-	->assertDontSee('Rival Cake');
+            ->assertSee('Use the payment section to settle this sale. Direct checkout is disabled.')
+            ->assertDontSee('Rival Cake');
 
         $this->assertSame(OrderStatus::Open, $foreignOrder->fresh()->status);
         $this->assertSame('10.000', $this->balance($foreignOutlet, $foreignVariant));
@@ -235,7 +248,7 @@ class FilamentCashierTest extends TestCase
         $this->cashier()
             ->set('orderId', $order->id)
             ->call('checkout')
-	->assertSee('Use the payment section to settle this sale. Direct checkout is disabled.');
+            ->assertSee('Use the payment section to settle this sale. Direct checkout is disabled.');
         $this->assertSame(OrderStatus::Open, $order->fresh()->status);
         $this->assertSame('10.000', $this->balance($otherOutlet, $variant));
     }

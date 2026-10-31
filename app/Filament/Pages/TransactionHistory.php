@@ -2,8 +2,13 @@
 
 namespace App\Filament\Pages;
 
+use App\Enums\BusinessAbility;
+use App\Enums\StaffRole;
 use App\Models\Order;
 use App\Models\Payment;
+use App\Models\User;
+use App\Support\BusinessAccess;
+use App\Support\Money;
 use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Pages\Page;
@@ -63,13 +68,13 @@ class TransactionHistory extends Page implements HasTable
                 TextColumn::make('status')
                     ->label('Transaction Status')
                     ->badge()
-                    ->formatStateUsing(fn ($state): string => match ($state instanceof \BackedEnum ? $state->value : $state) {
+                    ->formatStateUsing(fn ($state): string => match ($state instanceof BackedEnum ? $state->value : $state) {
                         'open' => 'Open',
                         'completed' => 'Completed',
                         'cancelled' => 'Cancelled',
-                        default => (string) ($state instanceof \BackedEnum ? $state->value : $state),
+                        default => (string) ($state instanceof BackedEnum ? $state->value : $state),
                     })
-                    ->color(fn ($state): string => match ($state instanceof \BackedEnum ? $state->value : $state) {
+                    ->color(fn ($state): string => match ($state instanceof BackedEnum ? $state->value : $state) {
                         'completed' => 'success',
                         'open' => 'warning',
                         'cancelled' => 'danger',
@@ -141,7 +146,8 @@ class TransactionHistory extends Page implements HasTable
     }
 
     /**
-     * Only orders belonging to businesses owned by the authenticated user.
+     * Only the orders this user may see: every outlet of their businesses (owner,
+     * business admin) or the assigned outlet only (cashier). Nobody else sees any.
      *
      * @return Builder<Order>
      */
@@ -149,15 +155,23 @@ class TransactionHistory extends Page implements HasTable
     {
         $user = auth()->user();
 
-        if ($user === null) {
+        if (! $user instanceof User) {
             return Order::query()->whereKey([]);
         }
 
-        return Order::query()
-            ->whereHas(
-                'business',
-                fn (Builder $businesses): Builder => $businesses->where('user_id', $user->getKey()),
-            )
+        $scope = self::historyScopeFor($user);
+
+        if ($scope === null) {
+            return Order::query()->whereKey([]);
+        }
+
+        $query = Order::query()->whereIn('orders.business_id', $scope['business_ids']);
+
+        if ($scope['outlet_id'] !== null) {
+            $query->where('orders.outlet_id', $scope['outlet_id']);
+        }
+
+        return $query
             ->with([
                 'outlet:id,name',
                 'items:id,order_id,unit_price,quantity',
@@ -188,13 +202,62 @@ class TransactionHistory extends Page implements HasTable
             return '0';
         }
 
-        return \App\Support\Money::sum($order->items->map(
-            fn ($item): string => \App\Support\Money::mulQuantity((string) $item->unit_price, $item->quantity),
+        return Money::sum($order->items->map(
+            fn ($item): string => Money::mulQuantity((string) $item->unit_price, $item->quantity),
         ));
     }
 
     private function formatRupiah(string|int|float $amount): string
     {
         return 'Rp '.number_format((float) $amount, 0, ',', '.');
+    }
+
+    public static function canAccess(): bool
+    {
+        $user = auth()->user();
+
+        if (! $user instanceof User) {
+            return false;
+        }
+
+        return $user->isOwner() || self::historyScopeFor($user) !== null;
+    }
+
+    /**
+     * Which orders a user may see in the history: every outlet of the businesses
+     * they own or administer (owner, business admin), or only their assigned
+     * outlet (cashier). Null means no access: kitchen, unassigned or invalid
+     * accounts. The abilities come from BusinessAccess; nothing is decided here.
+     *
+     * @return array{business_ids: list<int>, outlet_id: int|null}|null
+     */
+    private static function historyScopeFor(User $user): ?array
+    {
+        $access = app(BusinessAccess::class);
+
+        $businessIds = $access->businessIdsFor($user, BusinessAbility::ViewOrders);
+
+        if ($businessIds !== []) {
+            return ['business_ids' => $businessIds, 'outlet_id' => null];
+        }
+
+        if (
+            $user->staffRole() === StaffRole::Cashier
+            && $user->business_id !== null
+            && $user->outlet_id !== null
+            && $access->can(
+                $user,
+                BusinessAbility::ViewOrders,
+                (int) $user->business_id,
+                (int) $user->outlet_id,
+            )
+        ) {
+            return [
+                'business_ids' => [(int) $user->business_id],
+                'outlet_id' => (int) $user->outlet_id,
+            ];
+        }
+
+        return null;
     }
 }

@@ -9,10 +9,12 @@ use App\Models\Category;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\Outlet;
+use App\Models\Payment;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\User;
 use App\Services\OrderService;
+use App\Services\PaymentService;
 use App\Services\StockService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use LogicException;
@@ -612,7 +614,7 @@ class OrderServiceTest extends TestCase
 
     public function test_cancelling_an_order_rejects_pending_qris_and_preserves_payment_audit(): void
     {
-        $payments = new \App\Services\PaymentService($this->service);
+        $payments = new PaymentService($this->service);
         $variant = $this->variantFor($this->business, ['price' => '10.00']);
         $order = $this->service->createOrder($this->owner, $this->business, $this->outlet);
         $this->service->addItem($this->owner, $order, $variant, 1);
@@ -620,7 +622,7 @@ class OrderServiceTest extends TestCase
         $billedOrder = $payments->createBill(
             $this->owner,
             $order,
-            \App\Services\PaymentService::MODE_DIRECT,
+            PaymentService::MODE_DIRECT,
         );
 
         $pending = $payments->createQrisPayment(
@@ -635,7 +637,7 @@ class OrderServiceTest extends TestCase
             'Duplicate order',
         );
 
-        $storedPayment = \App\Models\Payment::query()->findOrFail($pending->id);
+        $storedPayment = Payment::query()->findOrFail($pending->id);
 
         $this->assertSame(OrderStatus::Cancelled, $cancelled->status);
         $this->assertSame('rejected', $storedPayment->status);
@@ -646,7 +648,7 @@ class OrderServiceTest extends TestCase
 
     public function test_an_open_order_with_a_confirmed_split_payment_cannot_be_cancelled(): void
     {
-        $payments = new \App\Services\PaymentService($this->service);
+        $payments = new PaymentService($this->service);
         $variant = $this->variantFor($this->business, ['price' => '10.00']);
         $order = $this->service->createOrder($this->owner, $this->business, $this->outlet);
         $this->service->addItem($this->owner, $order, $variant, 3);
@@ -654,7 +656,7 @@ class OrderServiceTest extends TestCase
         $billedOrder = $payments->createBill(
             $this->owner,
             $order,
-            \App\Services\PaymentService::MODE_SPLIT_EQUAL,
+            PaymentService::MODE_SPLIT_EQUAL,
             ['Person A', 'Person B'],
         );
 

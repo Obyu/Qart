@@ -2,11 +2,13 @@
 
 namespace App\Filament\Resources\Products;
 
+use App\Enums\BusinessAbility;
 use App\Filament\Resources\Products\Pages\CreateProduct;
 use App\Filament\Resources\Products\Pages\EditProduct;
 use App\Filament\Resources\Products\Pages\ListProducts;
 use App\Filament\Resources\Products\Schemas\ProductForm;
 use App\Filament\Resources\Products\Tables\ProductsTable;
+use App\Filament\Support\AuthorizesByBusinessAbility;
 use App\Models\Product;
 use BackedEnum;
 use Filament\Resources\Resource;
@@ -17,16 +19,23 @@ use Illuminate\Database\Eloquent\Builder;
 
 class ProductResource extends Resource
 {
+    use AuthorizesByBusinessAbility;
+
     protected static ?string $model = Product::class;
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleStack;
 
     protected static ?string $recordTitleAttribute = 'name';
 
+    protected static function requiredAbility(): BusinessAbility
+    {
+        return BusinessAbility::ManageCatalog;
+    }
+
     public static function getEloquentQuery(): Builder
     {
         return parent::getEloquentQuery()
-            ->whereHas('business', fn (Builder $query) => $query->where('user_id', auth()->id()));
+            ->whereIn('business_id', static::accessibleBusinessIds());
     }
 
     public static function form(Schema $schema): Schema

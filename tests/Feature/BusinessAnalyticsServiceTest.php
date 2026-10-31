@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\Enums\OrderStatus;
 use App\Models\Business;
 use App\Models\Category;
 use App\Models\Order;
@@ -13,6 +12,7 @@ use App\Models\ProductVariant;
 use App\Models\User;
 use App\Services\BusinessAnalyticsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 class BusinessAnalyticsServiceTest extends TestCase
@@ -88,7 +88,6 @@ class BusinessAnalyticsServiceTest extends TestCase
         $this->assertSame(1, $result['open_orders']);
     }
 
-
     public function test_payment_metrics_count_only_confirmed_payments_for_owned_businesses(): void
     {
         $owner = User::factory()->create();
@@ -119,7 +118,7 @@ class BusinessAnalyticsServiceTest extends TestCase
         $now = now()->toDateTimeString();
 
         // Cash: revenue is the bill amount, not the cash received.
-        \Illuminate\Support\Facades\DB::table('payments')->insert([
+        DB::table('payments')->insert([
             'order_id' => $completedOrder->id,
             'method' => 'cash',
             'status' => 'confirmed',
@@ -133,7 +132,7 @@ class BusinessAnalyticsServiceTest extends TestCase
         ]);
 
         // Pending QRIS should be counted as pending, not confirmed.
-        \Illuminate\Support\Facades\DB::table('payments')->insert([
+        DB::table('payments')->insert([
             'order_id' => $openOrder->id,
             'method' => 'qris',
             'status' => 'pending',
@@ -144,7 +143,7 @@ class BusinessAnalyticsServiceTest extends TestCase
         ]);
 
         // Rejected QRIS remains in history but is not confirmed revenue.
-        \Illuminate\Support\Facades\DB::table('payments')->insert([
+        DB::table('payments')->insert([
             'order_id' => $openOrder->id,
             'method' => 'qris',
             'status' => 'rejected',
@@ -157,7 +156,7 @@ class BusinessAnalyticsServiceTest extends TestCase
         ]);
 
         // Another owner's confirmed payment must not leak into this report.
-        \Illuminate\Support\Facades\DB::table('payments')->insert([
+        DB::table('payments')->insert([
             'order_id' => $otherOrder->id,
             'method' => 'qris',
             'status' => 'confirmed',
@@ -174,5 +173,4 @@ class BusinessAnalyticsServiceTest extends TestCase
         $this->assertSame('20.00', $result['confirmed_payments']);
         $this->assertSame(1, $result['pending_qris_payments']);
     }
-
 }

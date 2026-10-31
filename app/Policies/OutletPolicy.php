@@ -2,8 +2,10 @@
 
 namespace App\Policies;
 
+use App\Enums\BusinessAbility;
 use App\Models\Outlet;
 use App\Models\User;
+use App\Support\BusinessAccess;
 
 class OutletPolicy
 {
@@ -24,21 +26,29 @@ class OutletPolicy
 
     public function view(User $user, Outlet $outlet): bool
     {
-        return $this->owns($user, $outlet);
+        return $this->manages($user, $outlet);
     }
 
     public function update(User $user, Outlet $outlet): bool
     {
-        return $this->owns($user, $outlet);
+        return $this->manages($user, $outlet);
     }
 
     public function delete(User $user, Outlet $outlet): bool
     {
-        return $this->owns($user, $outlet);
+        return $this->manages($user, $outlet);
     }
 
-    private function owns(User $user, Outlet $outlet): bool
+    /**
+     * ManageOutlet is a business-level ability, so the outlet id is deliberately
+     * not passed: BusinessAccess grants it to a business admin only without one.
+     */
+    private function manages(User $user, Outlet $outlet): bool
     {
-        return (int) $outlet->business?->user_id === (int) $user->getKey();
+        return app(BusinessAccess::class)->can(
+            $user,
+            BusinessAbility::ManageOutlet,
+            (int) $outlet->business_id,
+        );
     }
 }

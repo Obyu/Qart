@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\BusinessAbility;
 use App\Enums\OrderStatus;
 use App\Exceptions\OrderException;
 use App\Exceptions\StockException;
@@ -11,6 +12,7 @@ use App\Models\OrderItem;
 use App\Models\Outlet;
 use App\Models\ProductVariant;
 use App\Models\User;
+use App\Support\BusinessAccess;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -45,9 +47,14 @@ class OrderService
 
     private readonly StockService $stock;
 
-    public function __construct(?StockService $stock = null)
-    {
+    private readonly BusinessAccess $access;
+
+    public function __construct(
+        ?StockService $stock = null,
+        ?BusinessAccess $access = null,
+    ) {
         $this->stock = $stock ?? new StockService;
+        $this->access = $access ?? new BusinessAccess;
     }
 
     /**
@@ -98,7 +105,7 @@ class OrderService
         $quantity = $this->normalizeQuantity($quantity);
 
         return DB::transaction(function () use ($actor, $order, $variant, $quantity): OrderItem {
-            $locked = $this->lockOrderForActor($actor, $order);
+            $locked = $this->lockOrderForActor($actor, $order, BusinessAbility::CreateOrder);
             $this->assertOpen($locked);
 
             if ($locked->payment_mode !== null || $locked->bill_total !== null) {
@@ -161,7 +168,7 @@ class OrderService
     public function completeOrder(User $actor, Order $order): Order
     {
         return DB::transaction(function () use ($actor, $order): Order {
-            $locked = $this->lockOrderForActor($actor, $order);
+            $locked = $this->lockOrderForActor($actor, $order, BusinessAbility::CreateOrder);
             $this->assertOpen($locked);
 
             $hasItems = OrderItem::query()
@@ -203,7 +210,7 @@ class OrderService
     public function completeSale(User $actor, Order $order): Order
     {
         return DB::transaction(function () use ($actor, $order): Order {
-            $locked = $this->lockOrderForActor($actor, $order);
+            $locked = $this->lockOrderForActor($actor, $order, BusinessAbility::ManagePayment);
             $this->assertOpen($locked);
 
             $hasItems = OrderItem::query()
@@ -243,7 +250,7 @@ class OrderService
         }
 
         return DB::transaction(function () use ($actor, $order, $reason): Order {
-            $locked = $this->lockOrderForActor($actor, $order);
+            $locked = $this->lockOrderForActor($actor, $order, BusinessAbility::CancelOrder);
             $this->assertOpen($locked);
 
             $hasConfirmedPayment = $locked->payments()
@@ -296,23 +303,35 @@ class OrderService
             throw OrderException::notFound();
         }
 
-        if ((int) $freshBusiness->user_id !== (int) $actor->getKey()) {
-            throw OrderException::unauthorized();
-        }
-
         if ((int) $freshOutlet->business_id !== (int) $freshBusiness->getKey()) {
             throw OrderException::businessMismatch();
         }
 
-        return [(int) $freshBusiness->getKey(), (int) $freshOutlet->getKey()];
+        $businessId = (int) $freshBusiness->getKey();
+        $outletId = (int) $freshOutlet->getKey();
+
+        if (! $this->access->can(
+            $actor,
+            BusinessAbility::CreateOrder,
+            $businessId,
+            $outletId,
+        )) {
+            throw OrderException::unauthorized();
+        }
+
+        return [$businessId, $outletId];
     }
 
     /**
      * Lock the order row, then check that the actor owns its business. Must run
      * inside the transaction, as the first statement of the critical section.
      */
-    private function lockOrderForActor(User $actor, Order $order): Order
-    {
+    private function lockOrderForActor(
+        User $actor,
+        Order $order,
+        BusinessAbility $ability,
+    ): Order {
+        // Keep the order row lock as the first database operation in this section.
         $locked = Order::query()
             ->whereKey($order->getKey())
             ->lockForUpdate()
@@ -322,9 +341,20 @@ class OrderService
             throw OrderException::notFound();
         }
 
-        $ownerId = Business::query()->whereKey($locked->business_id)->value('user_id');
+        $businessExists = Business::query()
+            ->whereKey($locked->business_id)
+            ->exists();
 
-        if ($ownerId === null || (int) $ownerId !== (int) $actor->getKey()) {
+        if (! $businessExists) {
+            throw OrderException::notFound();
+        }
+
+        if (! $this->access->can(
+            $actor,
+            $ability,
+            (int) $locked->business_id,
+            (int) $locked->outlet_id,
+        )) {
             throw OrderException::unauthorized();
         }
 

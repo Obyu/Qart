@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\BusinessAbility;
 use App\Enums\StockMovementType;
 use App\Exceptions\StockException;
 use App\Models\Order;
@@ -11,6 +12,7 @@ use App\Models\ProductVariant;
 use App\Models\StockLevel;
 use App\Models\StockMovement;
 use App\Models\User;
+use App\Support\BusinessAccess;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -21,6 +23,13 @@ use Illuminate\Support\Facades\DB;
  */
 class StockService
 {
+    private readonly BusinessAccess $access;
+
+    public function __construct(?BusinessAccess $access = null)
+    {
+        $this->access = $access ?? new BusinessAccess;
+    }
+
     private const SCALE = 3;
 
     /** Largest value a DECIMAL(14,3) column can hold. */
@@ -111,7 +120,7 @@ class StockService
                     throw StockException::notFound();
                 }
 
-                $this->resolveScope($actor, $outlet, $item->productVariant);
+                $this->resolveScope($actor, $outlet, $item->productVariant, BusinessAbility::ManagePayment);
             }
 
             $alreadySold = StockMovement::query()
@@ -177,7 +186,7 @@ class StockService
         $delta = $this->normalizeDelta($type, $quantity);
         $note = $this->normalizeNote($note);
 
-        [$outletId, $variantId] = $this->resolveScope($actor, $outlet, $variant);
+        [$outletId, $variantId] = $this->resolveScope($actor, $outlet, $variant, BusinessAbility::ManageStock);
 
         return DB::transaction(function () use ($type, $actor, $outletId, $variantId, $delta, $note): StockMovement {
             $level = $this->lockOrCreateLevel($outletId, $variantId);
@@ -326,8 +335,12 @@ class StockService
      *
      * @return array{0: int, 1: int} outlet id and variant id
      */
-    private function resolveScope(User $actor, Outlet $outlet, ProductVariant $variant): array
-    {
+    private function resolveScope(
+        User $actor,
+        Outlet $outlet,
+        ProductVariant $variant,
+        BusinessAbility $ability,
+    ): array {
         $freshOutlet = Outlet::query()->with('business:id,user_id')->find($outlet->getKey());
         $freshVariant = ProductVariant::query()->with('product:id,business_id')->find($variant->getKey());
 
@@ -335,12 +348,17 @@ class StockService
             throw StockException::notFound();
         }
 
-        if ((int) $freshOutlet->business->user_id !== (int) $actor->getKey()) {
-            throw StockException::unauthorized();
-        }
-
         if ((int) $freshVariant->product->business_id !== (int) $freshOutlet->business_id) {
             throw StockException::businessMismatch();
+        }
+
+        if (! $this->access->can(
+            $actor,
+            $ability,
+            (int) $freshOutlet->business_id,
+            (int) $freshOutlet->getKey(),
+        )) {
+            throw StockException::unauthorized();
         }
 
         return [(int) $freshOutlet->getKey(), (int) $freshVariant->getKey()];

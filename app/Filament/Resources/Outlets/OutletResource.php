@@ -2,11 +2,13 @@
 
 namespace App\Filament\Resources\Outlets;
 
+use App\Enums\BusinessAbility;
 use App\Filament\Resources\Outlets\Pages\CreateOutlet;
 use App\Filament\Resources\Outlets\Pages\EditOutlet;
 use App\Filament\Resources\Outlets\Pages\ListOutlets;
 use App\Filament\Resources\Outlets\Schemas\OutletForm;
 use App\Filament\Resources\Outlets\Tables\OutletsTable;
+use App\Filament\Support\AuthorizesByBusinessAbility;
 use App\Models\Outlet;
 use BackedEnum;
 use Filament\Resources\Resource;
@@ -17,16 +19,23 @@ use Illuminate\Database\Eloquent\Builder;
 
 class OutletResource extends Resource
 {
+    use AuthorizesByBusinessAbility;
+
     protected static ?string $model = Outlet::class;
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleStack;
 
     protected static ?string $recordTitleAttribute = 'name';
 
+    protected static function requiredAbility(): BusinessAbility
+    {
+        return BusinessAbility::ManageOutlet;
+    }
+
     public static function getEloquentQuery(): Builder
     {
         return parent::getEloquentQuery()
-            ->whereHas('business', fn (Builder $query) => $query->where('user_id', auth()->id()));
+            ->whereIn('business_id', static::accessibleBusinessIds());
     }
 
     public static function form(Schema $schema): Schema

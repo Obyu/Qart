@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Enums\StaffRole;
 use App\Filament\Resources\Businesses\BusinessResource;
 use App\Filament\Resources\Categories\CategoryResource;
 use App\Filament\Resources\Outlets\OutletResource;
@@ -82,6 +83,62 @@ class OwnershipPoliciesTest extends TestCase
         $this->assertOwnershipAbilities($this->ownedChain()['business'], 'business');
     }
 
+    public function test_business_creation_and_bulk_deletion_are_denied_to_staff(): void
+    {
+        $business = Business::factory()->for($this->owner)->create();
+        $outlet = Outlet::factory()->for($business)->create();
+
+        $staffRoles = [
+            StaffRole::BusinessAdmin,
+            StaffRole::Cashier,
+            StaffRole::Kitchen,
+        ];
+
+        foreach ($staffRoles as $role) {
+            $staff = User::factory()->create();
+
+            $staff->forceFill([
+                'role' => $role->value,
+                'business_id' => $business->id,
+                'outlet_id' => $role === StaffRole::BusinessAdmin
+                    ? null
+                    : $outlet->id,
+            ])->save();
+
+            $gate = Gate::forUser($staff);
+
+            $this->assertFalse(
+                $gate->allows('create', Business::class),
+                "{$role->value} must not create a business."
+            );
+
+            $this->assertFalse(
+                $gate->allows('deleteAny', Business::class),
+                "{$role->value} must not bulk-delete businesses."
+            );
+        }
+    }
+
+    public function test_users_with_staff_attributes_cannot_create_a_business_even_without_a_role(): void
+    {
+        $business = Business::factory()->for($this->owner)->create();
+        $outlet = Outlet::factory()->for($business)->create();
+
+        $users = [
+            (new User)->forceFill(['business_id' => $business->id]),
+            (new User)->forceFill(['outlet_id' => $outlet->id]),
+        ];
+
+        foreach ($users as $user) {
+            $this->assertNull($user->role);
+
+            $this->assertFalse(
+                Gate::forUser($user)->allows('create', Business::class),
+                'A user with staff attributes must not create a business.'
+            );
+        }
+    }
+
     public function test_outlet_policy_limits_record_access_to_the_owner(): void
     {
         $this->assertOwnershipAbilities($this->ownedChain()['outlet'], 'outlet');
@@ -106,7 +163,7 @@ class OwnershipPoliciesTest extends TestCase
 
     public function test_view_any_create_and_delete_any_are_allowed_for_any_authenticated_user(): void
     {
-        $models = [Business::class, Outlet::class, Category::class, Product::class, ProductVariant::class];
+        $models = [Outlet::class, Category::class, Product::class, ProductVariant::class];
 
         foreach ([$this->owner, $this->other] as $user) {
             foreach ($models as $model) {

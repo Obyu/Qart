@@ -2,8 +2,10 @@
 
 namespace App\Policies;
 
+use App\Enums\BusinessAbility;
 use App\Models\Category;
 use App\Models\User;
+use App\Support\BusinessAccess;
 
 class CategoryPolicy
 {
@@ -24,21 +26,25 @@ class CategoryPolicy
 
     public function view(User $user, Category $category): bool
     {
-        return $this->owns($user, $category);
+        return $this->manages($user, $category);
     }
 
     public function update(User $user, Category $category): bool
     {
-        return $this->owns($user, $category);
+        return $this->manages($user, $category);
     }
 
     public function delete(User $user, Category $category): bool
     {
-        return $this->owns($user, $category);
+        return $this->manages($user, $category);
     }
 
-    private function owns(User $user, Category $category): bool
+    private function manages(User $user, Category $category): bool
     {
-        return (int) $category->business?->user_id === (int) $user->getKey();
+        return app(BusinessAccess::class)->can(
+            $user,
+            BusinessAbility::ManageCatalog,
+            (int) $category->business_id,
+        );
     }
 }

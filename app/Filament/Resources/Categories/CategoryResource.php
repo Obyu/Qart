@@ -2,11 +2,13 @@
 
 namespace App\Filament\Resources\Categories;
 
+use App\Enums\BusinessAbility;
 use App\Filament\Resources\Categories\Pages\CreateCategory;
 use App\Filament\Resources\Categories\Pages\EditCategory;
 use App\Filament\Resources\Categories\Pages\ListCategories;
 use App\Filament\Resources\Categories\Schemas\CategoryForm;
 use App\Filament\Resources\Categories\Tables\CategoriesTable;
+use App\Filament\Support\AuthorizesByBusinessAbility;
 use App\Models\Category;
 use BackedEnum;
 use Filament\Resources\Resource;
@@ -17,16 +19,23 @@ use Illuminate\Database\Eloquent\Builder;
 
 class CategoryResource extends Resource
 {
+    use AuthorizesByBusinessAbility;
+
     protected static ?string $model = Category::class;
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleStack;
 
     protected static ?string $recordTitleAttribute = 'name';
 
+    protected static function requiredAbility(): BusinessAbility
+    {
+        return BusinessAbility::ManageCatalog;
+    }
+
     public static function getEloquentQuery(): Builder
     {
         return parent::getEloquentQuery()
-            ->whereHas('business', fn (Builder $query) => $query->where('user_id', auth()->id()));
+            ->whereIn('business_id', static::accessibleBusinessIds());
     }
 
     public static function form(Schema $schema): Schema

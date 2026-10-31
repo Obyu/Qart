@@ -2,8 +2,10 @@
 
 namespace App\Policies;
 
+use App\Enums\BusinessAbility;
 use App\Models\Product;
 use App\Models\User;
+use App\Support\BusinessAccess;
 
 class ProductPolicy
 {
@@ -24,21 +26,25 @@ class ProductPolicy
 
     public function view(User $user, Product $product): bool
     {
-        return $this->owns($user, $product);
+        return $this->manages($user, $product);
     }
 
     public function update(User $user, Product $product): bool
     {
-        return $this->owns($user, $product);
+        return $this->manages($user, $product);
     }
 
     public function delete(User $user, Product $product): bool
     {
-        return $this->owns($user, $product);
+        return $this->manages($user, $product);
     }
 
-    private function owns(User $user, Product $product): bool
+    private function manages(User $user, Product $product): bool
     {
-        return (int) $product->business?->user_id === (int) $user->getKey();
+        return app(BusinessAccess::class)->can(
+            $user,
+            BusinessAbility::ManageCatalog,
+            (int) $product->business_id,
+        );
     }
 }
